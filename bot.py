@@ -157,7 +157,20 @@ class GentleHabitsBot(commands.Bot):
         channel = self.get_channel(int(REMINDER_CHANNEL_ID))
         if not channel:
             return
+        # Get users who need to be reminded for this habit
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                '''SELECT user_id FROM user_habits 
+                   WHERE habit_id = ? AND NOT checked_in_today''',
+                (habit_id,)
+            )
+            users = await cursor.fetchall()
             
+        if not users:
+            return
+            
+        mentions = " ".join(f"<@{user[0]}>" for user in users)
+        content = f"{mentions} Time to check in!"
         embed = discord.Embed(
             title=f"✨ Time for: {habit_name}",
             description="Click the button below to check in!",
