@@ -1,14 +1,28 @@
 # Gentle Habits Discord Bot
 
-A Discord bot designed for gentle, ADHD-friendly habit tracking and reminders with minimal friction. The bot helps users maintain daily streaks, manage restock reminders, and provides positive reinforcement.
+A Discord bot designed for gentle, ADHD-friendly habit tracking and reminders with minimal friction. The bot helps users maintain daily streaks, manage restock reminders, and provides positive reinforcement through a colorful and encouraging interface.
 
 ## Features
 
-- **Daily Streak Tracking**: Simple button-based check-in system with optional public/private streaks
-- **Dedicated Reminder Channel**: Daily reminders with interactive buttons for easy check-ins
-- **Gentle Nudges**: Get reminders about your tasks and upcoming restocks
-- **Restock Tracking**: Never run out of important items with timely reminders
-- **Positive Reinforcement**: Receive supportive affirmations for completing tasks
+- **Daily Streak Tracking**: Simple button-based check-in system with streak board updates every 15 minutes
+- **Dedicated Reminder Channel**: Customizable daily reminders with interactive buttons for easy check-ins
+- **Gentle Nudges**: Personalized reminders about your tasks and upcoming restocks
+- **Restock Tracking**: Never run out of important items with 3-day advance reminders
+- **Positive Reinforcement**: Receive supportive affirmations from a curated list when completing tasks
+- **Multi-User Support**: Track habits and streaks for multiple users in your server
+- **Colorful Interface**: Beautiful colored console output for easy monitoring
+
+## Requirements
+
+- Python 3.8 or higher
+- Discord.py 2.0 or higher
+- Required Discord Bot Permissions:
+  - Send Messages
+  - Embed Links
+  - Add Reactions
+  - Use External Emojis
+  - Manage Messages
+  - View Channels
 
 ## Setup
 
@@ -22,10 +36,12 @@ A Discord bot designed for gentle, ADHD-friendly habit tracking and reminders wi
    - Go to [Discord Developer Portal](https://discord.com/developers/applications)
    - Create a New Application
    - Go to the Bot section and create a bot
+   - Enable necessary Privileged Gateway Intents:
+     - Message Content Intent
    - Copy the bot token
 
 4. Set up environment variables:
-   - Create a `.env` file in the project root
+   - Create a `.env` file in the project root (use `.env.example` as a template)
    - Add your Discord token and reminder channel ID:
      ```
      DISCORD_TOKEN=your_token_here
@@ -37,26 +53,26 @@ A Discord bot designed for gentle, ADHD-friendly habit tracking and reminders wi
    python bot.py
    ```
 
-## Features
+## Commands
 
-### Channel-Based Reminders
-The bot will send daily reminders to a designated channel at 8 PM with:
-- An interactive check-in button
-- Current streak information
-- Encouraging messages
+### Habit Management
+- `/habit add <name> <reminder_time> <expiry_time>`: Create a new habit
+- `/habit remove <name>`: Remove an existing habit
+- `/habit list`: View all your habits
+- `/habit join <name>`: Join an existing habit
+- `/habit leave <name>`: Leave a habit you're participating in
 
-### Streak Tracking
-- Click the ✨ Check In button in the reminder channel
-- Get private affirmations and streak updates
-- Streaks reset at midnight if you miss a day
+### Streak System
+- Interactive buttons for daily check-ins
+- Automatic streak tracking and updates
+- Public streak board updated every 15 minutes
+- Private streak notifications
 
-### Task Reminders
-- `/habit gentle-nudge`: Get a gentle reminder of your tasks and streaks
-
-### Restock Tracking
-- `/habit restock-add <item_name> <days_until_refill>`: Add an item to track
+### Restock System
+- `/habit restock-add <item_name> <days_between_refills>`: Add an item to track
+- `/habit restock-list`: View your restock items
+- `/habit restock-remove <item_name>`: Remove a restock item
 - `/habit restock-done <item_name>`: Mark an item as restocked
-- Restock reminders appear in the reminder channel
 
 ## Design Philosophy
 
@@ -64,7 +80,21 @@ The bot will send daily reminders to a designated channel at 8 PM with:
 - **Privacy-Focused**: Most responses are ephemeral by default
 - **Persistent Storage**: All data is stored in SQLite for reliability
 - **Automatic Scheduling**: Daily checks and reminders are handled automatically
+- **Positive Reinforcement**: Encouraging messages and streak tracking to build motivation
+
+## Database Structure
+
+The bot uses SQLite with the following main tables:
+- `habits`: Stores habit definitions and schedules
+- `user_habits`: Tracks individual user progress and streaks
+- `habit_participants`: Manages user participation in habits
+- `restock_items`: Tracks items that need periodic restocking
+- `affirmations`: Stores encouraging messages for positive reinforcement
 
 ## Contributing
 
-Feel free to submit issues and enhancement requests! 
+Feel free to submit issues and enhancement requests! Pull requests are welcome.
+
+## License
+
+This project is open source and available under the MIT License. 
