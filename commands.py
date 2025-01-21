@@ -14,7 +14,8 @@ class HabitCommands(app_commands.Group):
         name="Name of the habit",
         reminder_time="Time for daily reminder (HH:MM in 24h format)",
         expiry_time="Time when the reminder expires (HH:MM in 24h format)",
-        description="Optional description of the habit"
+        description="Optional description of the habit",
+        participants="Users to ping for this habit (mention them)"
     )
     async def create_habit(
         self,
@@ -22,7 +23,8 @@ class HabitCommands(app_commands.Group):
         name: str,
         reminder_time: str,
         expiry_time: str,
-        description: str = None
+        description: str = None,
+        participants: str = None
     ):
         # Validate time formats
         try:
@@ -37,6 +39,7 @@ class HabitCommands(app_commands.Group):
         
         async with aiosqlite.connect(self.bot.db_path) as db:
             try:
+                # Insert the habit
                 await db.execute(
                     '''INSERT INTO habits 
                        (name, reminder_time, expiry_time, description, created_at)
@@ -45,13 +48,39 @@ class HabitCommands(app_commands.Group):
                 )
                 await db.commit()
                 
+                # Get the habit ID
+                cursor = await db.execute('SELECT id FROM habits WHERE name = ?', (name,))
+                habit_id = (await cursor.fetchone())[0]
+                
+                # Add participants if specified
+                if participants:
+                    # Extract user IDs from mentions (format: <@123456789>)
+                    user_ids = [int(uid.strip("<@>")) for uid in participants.split() if uid.startswith("<@") and uid.endswith(">")]
+                    
+                    # Add each participant
+                    for user_id in user_ids:
+                        await db.execute(
+                            'INSERT INTO habit_participants (habit_id, user_id) VALUES (?, ?)',
+                            (habit_id, user_id)
+                        )
+                    await db.commit()
+                
                 # Restart scheduler to include new habit
                 await self.bot.setup_scheduler()
                 
+                # Create response message
+                response = [
+                    f"✨ Created new habit: {name}",
+                    f"Daily reminder at: {reminder_time}",
+                    f"Expires at: {expiry_time}"
+                ]
+                
+                if participants:
+                    participant_mentions = " ".join(f"<@{uid}>" for uid in user_ids)
+                    response.append(f"Participants: {participant_mentions}")
+                
                 await interaction.response.send_message(
-                    f"✨ Created new habit: {name}\n"
-                    f"Daily reminder at: {reminder_time}\n"
-                    f"Expires at: {expiry_time}",
+                    "\n".join(response),
                     ephemeral=True
                 )
             except aiosqlite.IntegrityError:
@@ -100,8 +129,27 @@ class HabitCommands(app_commands.Group):
             
             await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    async def habit_name_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        """Autocomplete handler for habit names"""
+        async with aiosqlite.connect(self.bot.db_path) as db:
+            # Get all habits that match the current input
+            cursor = await db.execute(
+                'SELECT name FROM habits WHERE name LIKE ? LIMIT 25',
+                (f"%{current}%",)
+            )
+            habits = await cursor.fetchall()
+            return [
+                app_commands.Choice(name=habit[0], value=habit[0])
+                for habit in habits
+            ]
+
     @app_commands.command(name="delete", description="Delete a habit")
     @app_commands.describe(name="Name of the habit to delete")
+    @app_commands.autocomplete(name=habit_name_autocomplete)
     async def delete_habit(self, interaction: discord.Interaction, name: str):
         async with aiosqlite.connect(self.bot.db_path) as db:
             cursor = await db.execute('SELECT id FROM habits WHERE name = ?', (name,))
@@ -118,6 +166,7 @@ class HabitCommands(app_commands.Group):
             
             # Delete the habit and all associated user data
             await db.execute('DELETE FROM user_habits WHERE habit_id = ?', (habit_id,))
+            await db.execute('DELETE FROM habit_participants WHERE habit_id = ?', (habit_id,))
             await db.execute('DELETE FROM habits WHERE id = ?', (habit_id,))
             await db.commit()
             
@@ -126,6 +175,125 @@ class HabitCommands(app_commands.Group):
             
             await interaction.response.send_message(
                 f"Deleted habit: {name}",
+                ephemeral=True
+            )
+
+    @app_commands.command(name="edit", description="Edit an existing habit")
+    @app_commands.describe(
+        name="Name of the habit to edit",
+        new_name="New name for the habit (optional)",
+        reminder_time="New reminder time (HH:MM in 24h format, optional)",
+        expiry_time="New expiry time (HH:MM in 24h format, optional)",
+        description="New description (optional)",
+        participants="Users to ping for this habit (mention them, optional)"
+    )
+    @app_commands.autocomplete(name=habit_name_autocomplete)
+    async def edit_habit(
+        self,
+        interaction: discord.Interaction,
+        name: str,
+        new_name: str = None,
+        reminder_time: str = None,
+        expiry_time: str = None,
+        description: str = None,
+        participants: str = None
+    ):
+        # Validate time formats if provided
+        if reminder_time:
+            try:
+                datetime.strptime(reminder_time, "%H:%M")
+            except ValueError:
+                await interaction.response.send_message(
+                    "Please use HH:MM format for reminder time (e.g., 09:00, 14:30)",
+                    ephemeral=True
+                )
+                return
+
+        if expiry_time:
+            try:
+                datetime.strptime(expiry_time, "%H:%M")
+            except ValueError:
+                await interaction.response.send_message(
+                    "Please use HH:MM format for expiry time (e.g., 09:00, 14:30)",
+                    ephemeral=True
+                )
+                return
+
+        async with aiosqlite.connect(self.bot.db_path) as db:
+            # Check if habit exists
+            cursor = await db.execute('SELECT id FROM habits WHERE name = ?', (name,))
+            habit = await cursor.fetchone()
+            
+            if not habit:
+                await interaction.response.send_message(
+                    f"Could not find a habit named '{name}'",
+                    ephemeral=True
+                )
+                return
+            
+            habit_id = habit[0]
+            
+            # Build update query dynamically based on provided fields
+            update_fields = []
+            params = []
+            
+            if new_name:
+                update_fields.append("name = ?")
+                params.append(new_name)
+            if reminder_time:
+                update_fields.append("reminder_time = ?")
+                params.append(reminder_time)
+            if expiry_time:
+                update_fields.append("expiry_time = ?")
+                params.append(expiry_time)
+            if description:
+                update_fields.append("description = ?")
+                params.append(description)
+            
+            if update_fields:
+                query = f"UPDATE habits SET {', '.join(update_fields)} WHERE id = ?"
+                params.append(habit_id)
+                try:
+                    await db.execute(query, params)
+                except aiosqlite.IntegrityError:
+                    await interaction.response.send_message(
+                        f"A habit with the name '{new_name}' already exists!",
+                        ephemeral=True
+                    )
+                    return
+            
+            # Update participants if specified
+            if participants:
+                # Clear existing participants
+                await db.execute('DELETE FROM habit_participants WHERE habit_id = ?', (habit_id,))
+                
+                # Add new participants
+                user_ids = [int(uid.strip("<@>")) for uid in participants.split() if uid.startswith("<@") and uid.endswith(">")]
+                for user_id in user_ids:
+                    await db.execute(
+                        'INSERT INTO habit_participants (habit_id, user_id) VALUES (?, ?)',
+                        (habit_id, user_id)
+                    )
+            
+            await db.commit()
+            
+            # Restart scheduler to apply changes
+            await self.bot.setup_scheduler()
+            
+            # Create response message
+            response = [f"✨ Updated habit: {new_name or name}"]
+            if reminder_time:
+                response.append(f"New reminder time: {reminder_time}")
+            if expiry_time:
+                response.append(f"New expiry time: {expiry_time}")
+            if description:
+                response.append(f"New description: {description}")
+            if participants:
+                participant_mentions = " ".join(f"<@{uid}>" for uid in user_ids)
+                response.append(f"New participants: {participant_mentions}")
+            
+            await interaction.response.send_message(
+                "\n".join(response),
                 ephemeral=True
             )
 

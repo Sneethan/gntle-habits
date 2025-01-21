@@ -64,6 +64,16 @@ class GentleHabitsBot(commands.Bot):
                 )
             ''')
             
+            # Create habit_participants table for storing who to ping
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS habit_participants (
+                    habit_id INTEGER,
+                    user_id INTEGER,
+                    PRIMARY KEY (habit_id, user_id),
+                    FOREIGN KEY (habit_id) REFERENCES habits(id)
+                )
+            ''')
+            
             # Create restock items table
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS restock_items (
@@ -157,13 +167,20 @@ class GentleHabitsBot(commands.Bot):
         channel = self.get_channel(int(REMINDER_CHANNEL_ID))
         if not channel:
             return
+            
         # Get users who need to be reminded for this habit
         async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                '''SELECT user_id FROM user_habits 
-                   WHERE habit_id = ? AND NOT checked_in_today''',
-                (habit_id,)
-            )
+            # Get all participants for this habit who haven't checked in today
+            cursor = await db.execute('''
+                SELECT DISTINCT hp.user_id 
+                FROM habit_participants hp
+                LEFT JOIN user_habits uh 
+                    ON hp.habit_id = uh.habit_id 
+                    AND hp.user_id = uh.user_id 
+                    AND date(uh.last_check_in) = date('now')
+                WHERE hp.habit_id = ? 
+                    AND (uh.last_check_in IS NULL OR date(uh.last_check_in) != date('now'))
+            ''', (habit_id,))
             users = await cursor.fetchall()
             
         if not users:
@@ -178,7 +195,7 @@ class GentleHabitsBot(commands.Bot):
         )
         
         view = HabitButton(habit_id)
-        message = await channel.send(embed=embed, view=view)
+        message = await channel.send(content=content, embed=embed, view=view)
         self.habit_messages[habit_id] = message.id
     
     async def check_habit_expiry(self, habit_id: int):
