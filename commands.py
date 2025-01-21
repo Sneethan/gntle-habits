@@ -1,8 +1,22 @@
+import os
 import discord
 from discord import app_commands
 from datetime import datetime, timedelta
 import random
 import aiosqlite
+import openai
+from dotenv import load_dotenv
+from openai import AsyncOpenAI
+
+# Load environment variables
+load_dotenv()
+DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
+
+# Configure OpenAI client for DeepSeek
+client = AsyncOpenAI(
+    api_key=DEEPSEEK_API_KEY,
+    base_url="https://api.deepseek.com/v1"  # DeepSeek's OpenAI-compatible endpoint
+)
 
 class HabitCommands(app_commands.Group):
     def __init__(self, bot):
@@ -400,6 +414,93 @@ class HabitCommands(app_commands.Group):
                 f"Great job restocking {item_name}! I'll remind you again in {days_between_refills} days! 🎉",
                 ephemeral=True
             )
+
+    @app_commands.command(name="break-down", description="Break down a task into smaller, manageable steps")
+    @app_commands.describe(
+        task="The task you want to break down",
+        complexity="How detailed should the breakdown be (simple/medium/detailed)",
+        context="Any additional context about the task (optional)"
+    )
+    async def break_down_task(
+        self,
+        interaction: discord.Interaction,
+        task: str,
+        complexity: str,
+        context: str = None
+    ):
+        # Validate complexity
+        valid_complexities = ["simple", "medium", "detailed"]
+        if complexity.lower() not in valid_complexities:
+            await interaction.response.send_message(
+                "Please choose 'simple', 'medium', or 'detailed' for complexity.",
+                ephemeral=True
+            )
+            return
+
+        # Defer the response since API call might take time
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            # Prepare the prompt based on complexity
+            num_steps = {
+                "simple": "3-5",
+                "medium": "5-8",
+                "detailed": "8-12"
+            }[complexity.lower()]
+
+            prompt = f"""Break down this task into {num_steps} small, manageable steps:
+Task: {task}
+{f'Context: {context}' if context else ''}
+
+Please format each step like this:
+1. [emoji] Step description (estimated time)
+
+Make the steps:
+- Specific and actionable
+- ADHD-friendly (clear start/end points)
+- Time-boxed (include estimated time)
+- Encouraging and gentle in tone
+- Each step should feel achievable in one sitting"""
+
+            # Call DeepSeek API using new OpenAI format
+            response = await client.chat.completions.create(
+                model="deepseek-reasoner",  # or whatever model name DeepSeek uses
+                messages=[
+                    {"role": "system", "content": "You are a gentle, ADHD-friendly task breakdown assistant. You help break down tasks into manageable steps, always including emojis and time estimates."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7
+            )
+
+            # Create embed response
+            embed = discord.Embed(
+                title=f"✨ Task Breakdown: {task}",
+                description="Here's your gentle task breakdown:",
+                color=discord.Color.blue()
+            )
+
+            # Add the steps to the embed
+            steps = response.choices[0].message.content.strip().split('\n')
+            for step in steps:
+                if step.strip():  # Skip empty lines
+                    embed.add_field(
+                        name="Step",
+                        value=step,
+                        inline=False
+                    )
+
+            # Add footer with context if provided
+            if context:
+                embed.set_footer(text=f"Context: {context}")
+
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        except Exception as e:
+            await interaction.followup.send(
+                "I had trouble breaking down that task. Please try again or make the task more specific.",
+                ephemeral=True
+            )
+            print(f"Error in break_down_task: {str(e)}")  # Log the error
 
 async def setup(bot):
     bot.tree.add_command(HabitCommands(bot)) 
