@@ -11,10 +11,46 @@ from dotenv import load_dotenv
 import logging
 import asyncio
 from views import DailyStreakView, HabitButton
+import colorama
+from colorama import Fore, Style
+
+# Initialize colorama for Windows support
+colorama.init()
+
+# ASCII Logo
+LOGO = f"""{Fore.GREEN}
+
+   _____            _   _        _    _       _     _ _       
+  / ____|          | | | |      | |  | |     | |   (_) |      
+ | |  __  ___ _ __ | |_| | ___  | |__| | __ _| |__  _| |_ ___ 
+ | | |_ |/ _ \ '_ \| __| |/ _ \ |  __  |/ _` | '_ \| | __/ __|
+ | |__| |  __/ | | | |_| |  __/ | |  | | (_| | |_) | | |_\__ 
+  \_____|\___|_| |_|\__|_|\___| |_|  |_|\__,_|_.__/|_|\__|___/
+                                                              
+                                                    
+{Style.RESET_ALL}"""
+
+# Set up logging with custom formatting
+class ColoredFormatter(logging.Formatter):
+    COLORS = {
+        'INFO': Fore.CYAN,
+        'WARNING': Fore.YELLOW,
+        'ERROR': Fore.RED,
+        'CRITICAL': Fore.RED + Style.BRIGHT,
+        'DEBUG': Fore.BLUE
+    }
+
+    def format(self, record):
+        color = self.COLORS.get(record.levelname, '')
+        record.msg = f"{color}[{record.levelname}]{Style.RESET_ALL} {record.msg}"
+        return super().format(record)
 
 # Set up logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('gentle_habits')
+logger.setLevel(logging.INFO)
+handler = logging.StreamHandler()
+handler.setFormatter(ColoredFormatter('%(asctime)s %(message)s', datefmt='%H:%M:%S'))
+logger.addHandler(handler)
 
 # Load environment variables
 load_dotenv()
@@ -305,14 +341,23 @@ bot = GentleHabitsBot()
 
 @bot.event
 async def on_ready():
-    logger.info(f'{bot.user} has connected to Discord!')
+    print(LOGO)
+    logger.info(f'🤖 Bot is awakening...')
+    logger.info(f'🌟 Connected as {bot.user}')
+    logger.info(f'🔧 Running Discord.py version: {discord.__version__}')
+    
     try:
         synced = await bot.tree.sync()
-        logger.info(f"Synced {len(synced)} command(s)")
+        logger.info(f'✨ Successfully synced {len(synced)} command(s)')
     except Exception as e:
-        logger.error(f"Failed to sync commands: {e}")
+        logger.error(f'❌ Failed to sync commands: {e}')
+    
+    logger.info(f'🎉 Bot is now ready to help build gentle habits!')
 
 if __name__ == '__main__':
     if not TOKEN:
+        logger.critical('❌ No Discord token found. Please set the DISCORD_TOKEN environment variable.')
         raise ValueError("No Discord token found. Please set the DISCORD_TOKEN environment variable.")
+    
+    logger.info('🚀 Starting Gentle Habits Bot...')
     bot.run(TOKEN) 
