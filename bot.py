@@ -248,25 +248,51 @@ class GentleHabitsBot(commands.Bot):
     
     async def update_streak_board(self):
         """Update the persistent streak board."""
-        if not REMINDER_CHANNEL_ID:
-            return
-            
-        channel = self.get_channel(int(REMINDER_CHANNEL_ID))
-        if not channel:
-            return
-            
-        embed = await self.create_streak_board_embed()
-        
-        if self.streak_message:
+        try:
+            if not REMINDER_CHANNEL_ID:
+                logger.warning("No reminder channel ID set - streak board updates disabled")
+                return
+                
+            channel = self.get_channel(int(REMINDER_CHANNEL_ID))
+            if not channel:
+                logger.error(f"Could not find channel with ID {REMINDER_CHANNEL_ID}")
+                return
+                
             try:
-                message = await channel.fetch_message(self.streak_message)
-                await message.edit(embed=embed)
-            except discord.NotFound:
-                message = await channel.send(embed=embed)
-                self.streak_message = message.id
-        else:
-            message = await channel.send(embed=embed)
-            self.streak_message = message.id
+                embed = await self.create_streak_board_embed()
+            except Exception as e:
+                logger.error(f"Failed to create streak board embed: {e}")
+                return
+                
+            try:
+                if self.streak_message:
+                    try:
+                        message = await channel.fetch_message(self.streak_message)
+                        await message.edit(embed=embed)
+                    except discord.NotFound:
+                        # Message was deleted, create new one
+                        message = await channel.send(embed=embed)
+                        self.streak_message = message.id
+                    except discord.Forbidden:
+                        logger.error("Bot lacks permissions to edit streak board message")
+                        return
+                    except Exception as e:
+                        logger.error(f"Failed to edit streak board message: {e}")
+                        # Try to send a new message
+                        try:
+                            message = await channel.send(embed=embed)
+                            self.streak_message = message.id
+                        except Exception as e2:
+                            logger.error(f"Also failed to send new streak board message: {e2}")
+                            return
+                else:
+                    message = await channel.send(embed=embed)
+                    self.streak_message = message.id
+            except Exception as e:
+                logger.error(f"Failed to update streak board: {e}")
+                
+        except Exception as e:
+            logger.error(f"Unexpected error in update_streak_board: {e}")
     
     async def create_streak_board_embed(self):
         """Create the streak board embed."""
@@ -276,24 +302,82 @@ class GentleHabitsBot(commands.Bot):
             color=discord.Color.gold()
         )
         
-        async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute('''
-                SELECT u.user_id, h.name, u.current_streak
-                FROM user_habits u
-                JOIN habits h ON u.habit_id = h.id
-                WHERE u.current_streak > 0
-                ORDER BY u.current_streak DESC
-                LIMIT 10
-            ''') as cursor:
-                async for user_id, habit_name, streak in cursor:
-                    user = await self.fetch_user(user_id)
-                    if user:
-                        embed.add_field(
-                            name=f"{user.display_name} - {habit_name}",
-                            value=f"🔥 {streak} day{'s' if streak != 1 else ''}",
-                            inline=False
-                        )
-        
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # First check if there are any streaks at all
+                cursor = await db.execute('''
+                    SELECT COUNT(*) 
+                    FROM user_habits 
+                    WHERE current_streak > 0
+                ''')
+                count = (await cursor.fetchone())[0]
+                
+                if count == 0:
+                    embed.description = "No active streaks yet! Start your habit journey today! ✨"
+                    embed.add_field(
+                        name="Get Started",
+                        value="Use `/habit create` to begin tracking a new habit!",
+                        inline=False
+                    )
+                    return embed
+                
+                # Get top streaks with user validation
+                async with db.execute('''
+                    SELECT u.user_id, h.name, u.current_streak
+                    FROM user_habits u
+                    JOIN habits h ON u.habit_id = h.id
+                    WHERE u.current_streak > 0
+                    ORDER BY u.current_streak DESC
+                    LIMIT 10
+                ''') as cursor:
+                    valid_entries = 0
+                    async for user_id, habit_name, streak in cursor:
+                        try:
+                            user = await self.fetch_user(user_id)
+                            if user:
+                                embed.add_field(
+                                    name=f"{user.display_name} - {habit_name}",
+                                    value=f"🔥 {streak} day{'s' if streak != 1 else ''}",
+                                    inline=False
+                                )
+                                valid_entries += 1
+                            else:
+                                # User no longer in server, clean up their entries
+                                await db.execute(
+                                    'DELETE FROM user_habits WHERE user_id = ?',
+                                    (user_id,)
+                                )
+                                await db.execute(
+                                    'DELETE FROM habit_participants WHERE user_id = ?',
+                                    (user_id,)
+                                )
+                        except discord.NotFound:
+                            # User no longer exists, clean up their entries
+                            await db.execute(
+                                'DELETE FROM user_habits WHERE user_id = ?',
+                                (user_id,)
+                            )
+                            await db.execute(
+                                'DELETE FROM habit_participants WHERE user_id = ?',
+                                (user_id,)
+                            )
+                        except Exception as e:
+                            logger.error(f"Error processing streak for user {user_id}: {e}")
+                            continue
+                
+                await db.commit()
+                
+                if valid_entries == 0:
+                    embed.description = "No active streaks yet! Start your habit journey today! ✨"
+                    embed.add_field(
+                        name="Get Started",
+                        value="Use `/habit create` to begin tracking a new habit!",
+                        inline=False
+                    )
+        except Exception as e:
+            logger.error(f"Error creating streak board embed: {e}")
+            embed.description = "⚠️ Error loading streak data. Please try again later."
+            
         embed.set_footer(text="Updated every 15 minutes")
         return embed
 
@@ -351,6 +435,13 @@ async def on_ready():
         logger.info(f'✨ Successfully synced {len(synced)} command(s)')
     except Exception as e:
         logger.error(f'❌ Failed to sync commands: {e}')
+    
+    # Send initial streak board
+    try:
+        await bot.update_streak_board()
+        logger.info('📊 Initial streak board sent')
+    except Exception as e:
+        logger.error(f'❌ Failed to send initial streak board: {e}')
     
     logger.info(f'🎉 Bot is now ready to help build gentle habits!')
 

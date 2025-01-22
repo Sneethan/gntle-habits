@@ -418,25 +418,21 @@ class HabitCommands(app_commands.Group):
     @app_commands.command(name="break-down", description="Break down a task into smaller, manageable steps")
     @app_commands.describe(
         task="The task you want to break down",
-        complexity="How detailed should the breakdown be (simple/medium/detailed)",
+        complexity="Choose how detailed you want the breakdown to be",
         context="Any additional context about the task (optional)"
     )
+    @app_commands.choices(complexity=[
+        app_commands.Choice(name="Simple (3-5 steps)", value="simple"),
+        app_commands.Choice(name="Medium (5-8 steps)", value="medium"),
+        app_commands.Choice(name="Detailed (8-12 steps)", value="detailed")
+    ])
     async def break_down_task(
         self,
         interaction: discord.Interaction,
         task: str,
-        complexity: str,
+        complexity: app_commands.Choice[str],
         context: str = None
     ):
-        # Validate complexity
-        valid_complexities = ["simple", "medium", "detailed"]
-        if complexity.lower() not in valid_complexities:
-            await interaction.response.send_message(
-                "Please choose 'simple', 'medium', or 'detailed' for complexity.",
-                ephemeral=True
-            )
-            return
-
         # Defer the response since API call might take time
         await interaction.response.defer(ephemeral=True)
 
@@ -446,7 +442,7 @@ class HabitCommands(app_commands.Group):
                 "simple": "3-5",
                 "medium": "5-8",
                 "detailed": "8-12"
-            }[complexity.lower()]
+            }[complexity.value]
 
             prompt = f"""Break down this task into {num_steps} small, manageable steps:
 Task: {task}
@@ -464,9 +460,9 @@ Make the steps:
 
             # Call DeepSeek API using new OpenAI format
             response = await client.chat.completions.create(
-                model="deepseek-reasoner",  # or whatever model name DeepSeek uses
+                model="deepseek-reasoner",  # Using chat model for more conversational responses
                 messages=[
-                    {"role": "system", "content": "You are a gentle, ADHD-friendly task breakdown assistant. You help break down tasks into manageable steps, always including emojis and time estimates."},
+                    {"role": "system", "content": "You are a gentle, ADHD-friendly task breakdown assistant. You help break down tasks into manageable steps, always including emojis and time estimates. Your tone is warm and encouraging, and you make sure each step feels achievable."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.7
@@ -501,6 +497,65 @@ Make the steps:
                 ephemeral=True
             )
             print(f"Error in break_down_task: {str(e)}")  # Log the error
+
+    @app_commands.command(name="help", description="Show all available commands and how to use them")
+    async def show_help(self, interaction: discord.Interaction):
+        embed = discord.Embed(
+            title="🌟 Gentle Habits Bot - Help Guide",
+            description="Here's how I can help you build gentle habits!",
+            color=discord.Color.blue()
+        )
+
+        # Habit Management
+        embed.add_field(
+            name="📝 Habit Management",
+            value="""
+• `/habit create` - Create a new habit to track
+  - Set reminder time and expiry time (HH:MM format)
+  - Add optional description and participants
+• `/habit list` - View all your habits and streaks
+• `/habit edit` - Modify an existing habit
+• `/habit delete` - Remove a habit
+""",
+            inline=False
+        )
+
+        # Task Breakdown
+        embed.add_field(
+            name="✨ Task Breakdown",
+            value="""
+• `/habit break-down` - Break down a task into manageable steps
+  - Choose complexity: Simple (3-5 steps), Medium (5-8), or Detailed (8-12)
+  - Add optional context for better breakdown
+""",
+            inline=False
+        )
+
+        # Restock System
+        embed.add_field(
+            name="📦 Restock Tracking",
+            value="""
+• `/habit restock-add` - Track an item for restocking
+  - Set number of days until refill needed
+• `/habit restock-done` - Mark an item as restocked
+""",
+            inline=False
+        )
+
+        # Daily Support
+        embed.add_field(
+            name="🌸 Daily Support",
+            value="""
+• `/habit gentle-nudge` - Get a friendly reminder of your tasks
+  - Shows current streaks and pending check-ins
+""",
+            inline=False
+        )
+
+        # Tips footer
+        embed.set_footer(text="💡 Most responses are ephemeral (only visible to you) for privacy!")
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 async def setup(bot):
     bot.tree.add_command(HabitCommands(bot)) 
