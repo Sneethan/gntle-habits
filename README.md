@@ -11,6 +11,8 @@ A Discord bot designed for gentle, ADHD-friendly habit tracking and reminders wi
 - **Positive Reinforcement**: Receive supportive affirmations from a curated list when completing tasks
 - **Multi-User Support**: Track habits and streaks for multiple users in your server
 - **Colorful Interface**: Beautiful colored console output for easy monitoring
+- **Timezone Support**: Configurable timezone for all reminders and schedules
+- **Reliability Features**: Automatic catch-up for missed reminders after restarts
 
 ## Requirements
 
@@ -42,10 +44,11 @@ A Discord bot designed for gentle, ADHD-friendly habit tracking and reminders wi
 
 4. Set up environment variables:
    - Create a `.env` file in the project root (use `.env.example` as a template)
-   - Add your Discord token and reminder channel ID:
+   - Add your Discord token, reminder channel ID, and timezone:
      ```
      DISCORD_TOKEN=your_token_here
      REMINDER_CHANNEL_ID=your_channel_id_here
+     TIMEZONE=your_timezone_here  # e.g., America/New_York
      ```
 
 5. Run the bot:
@@ -53,17 +56,43 @@ A Discord bot designed for gentle, ADHD-friendly habit tracking and reminders wi
    python bot.py
    ```
 
+## Configuration
+
+### Required Environment Variables
+- `DISCORD_TOKEN`: Your Discord bot token
+- `REMINDER_CHANNEL_ID`: Channel ID for reminders and streak board
+- `DEEPSEEK_API_KEY`: API key for task breakdown feature
+
+### Optional Environment Variables
+- `TIMEZONE`: IANA timezone name (defaults to UTC)
+- `DB_PATH`: Database file path (defaults to gentle_habits.db)
+- `MAX_DB_CONNECTIONS`: Maximum database connections (defaults to 5)
+- `STREAK_UPDATE_INTERVAL`: Minutes between streak updates (defaults to 5)
+- `LOG_LEVEL`: Logging level (defaults to INFO)
+
+## Reliability Features
+
+### Timezone Handling
+- All times are stored in a consistent format
+- Automatic conversion between UTC and local timezone
+- Proper handling of daylight saving time transitions
+- Configurable through environment variables
+
+### Restart Recovery
+- Checks for missed reminders from the last hour on startup
+- Only sends catch-up reminders for non-expired tasks
+- Maintains streak consistency across restarts
+- Logs all catch-up actions for monitoring
+
 ## Commands
 
 ### Habit Management
-- `/habit add <name> <reminder_time> <expiry_time>`: Create a new habit
-- `/habit remove <name>`: Remove an existing habit
-- `/habit list`: View all your habits
-- `/habit join <name>`: Join an existing habit
-- `/habit leave <name>`: Leave a habit you're participating in
+- `/habit create` - Create a new habit to track
+- `/habit list` - View all your habits
+- `/habit edit` - Modify an existing habit
+- `/habit delete` - Remove a habit
 
 ### Streak System
-- Interactive buttons for daily check-ins
 - Automatic streak tracking and updates
 - Public streak board updated every 15 minutes
 - Private streak notifications

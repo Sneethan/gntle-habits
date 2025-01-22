@@ -40,6 +40,15 @@ class Configuration:
         self.max_db_connections = int(self._get_optional('MAX_DB_CONNECTIONS', '5'))
         self.streak_update_interval = int(self._get_optional('STREAK_UPDATE_INTERVAL', '5'))  # minutes
         self.log_level = self._get_optional('LOG_LEVEL', 'INFO')
+        self.timezone = self._get_optional('TIMEZONE', 'UTC')  # Default to UTC if not specified
+        
+        # Validate timezone
+        try:
+            import zoneinfo
+            zoneinfo.ZoneInfo(self.timezone)
+        except zoneinfo.ZoneInfoNotFoundError:
+            logger.warning(f"Invalid timezone '{self.timezone}', falling back to UTC")
+            self.timezone = 'UTC'
         
     def _get_required(self, key: str, message: str) -> str:
         """Get a required configuration value."""
@@ -184,6 +193,13 @@ class GentleHabitsBot(commands.Bot):
                 logger.info('📊 Initial streak board sent')
             except Exception as e:
                 logger.error(f'❌ Failed to send initial streak board: {e}')
+                
+            # Check for missed reminders after bot is fully ready
+            try:
+                await self.check_missed_reminders()
+                logger.info('🔍 Checked for missed reminders')
+            except Exception as e:
+                logger.error(f'❌ Failed to check missed reminders: {e}')
             
             logger.info(f'🎉 Bot is now ready to help build gentle habits!')
 
@@ -281,23 +297,23 @@ class GentleHabitsBot(commands.Bot):
         """Create a new scheduler instance."""
         if self.scheduler:
             self.scheduler.shutdown(wait=False)
-        self.scheduler = AsyncIOScheduler()
+        self.scheduler = AsyncIOScheduler(timezone=config.timezone)
         
     async def setup_scheduler(self):
         """Set up dynamic schedulers for habits and reminders."""
         self.create_scheduler()
         
-        # Schedule restock reminders
+        # Schedule restock reminders - run at 9am in configured timezone
         self.scheduler.add_job(
             self.check_restock_reminders,
-            CronTrigger(hour=9, minute=0),
+            CronTrigger(hour=9, minute=0, timezone=config.timezone),
             id='check_restock'
         )
         
         # Schedule streak board updates
         self.scheduler.add_job(
             self.update_streak_board,
-            CronTrigger(minute=f'*/{config.streak_update_interval}'),
+            CronTrigger(minute=f'*/{config.streak_update_interval}', timezone=config.timezone),
             id='update_streaks'
         )
         
@@ -308,7 +324,7 @@ class GentleHabitsBot(commands.Bot):
                     await self._schedule_habit(*habit)
         
         self.scheduler.start()
-        logger.info("Scheduler initialized with all jobs")
+        logger.info(f"Scheduler initialized with all jobs in {config.timezone} timezone")
         
     async def _schedule_habit(self, habit_id: int, name: str, reminder_time: str, expiry_time: str):
         """Schedule reminder and expiry for a single habit."""
@@ -317,61 +333,66 @@ class GentleHabitsBot(commands.Bot):
             reminder_hour, reminder_minute = map(int, reminder_time.split(':'))
             self.scheduler.add_job(
                 self.send_habit_reminder,
-                CronTrigger(hour=reminder_hour, minute=reminder_minute),
+                CronTrigger(hour=reminder_hour, minute=reminder_minute, timezone=config.timezone),
                 id=f'reminder_{habit_id}',
                 args=[habit_id, name]
             )
             
             # Schedule expiry check
-            expiry_hour, expiry_minute = map(int, expiry_time.split(':'))
-            self.scheduler.add_job(
-                self.check_habit_expiry,
-                CronTrigger(hour=expiry_hour, minute=expiry_minute),
-                id=f'expiry_{habit_id}',
-                args=[habit_id]
-            )
-            logger.debug(f"Scheduled habit {name} (ID: {habit_id})")
+            if expiry_time:
+                expiry_hour, expiry_minute = map(int, expiry_time.split(':'))
+                self.scheduler.add_job(
+                    self.check_habit_expiry,
+                    CronTrigger(hour=expiry_hour, minute=expiry_minute, timezone=config.timezone),
+                    id=f'expiry_{habit_id}',
+                    args=[habit_id]
+                )
+            logger.debug(f"Scheduled habit {name} (ID: {habit_id}) for {reminder_time} {config.timezone}")
         except ValueError as e:
             logger.error(f"Failed to schedule habit {name} (ID: {habit_id}): {e}")
     
-    async def send_habit_reminder(self, habit_id: int, habit_name: str):
-        """Send a reminder for a specific habit."""
-        if not REMINDER_CHANNEL_ID:
-            return
-            
-        channel = self.get_channel(int(REMINDER_CHANNEL_ID))
-        if not channel:
-            return
-            
-        # Get users who need to be reminded for this habit
-        async with self.db_pool.acquire() as db:
-            # Get all participants for this habit who haven't checked in today
-            cursor = await db.execute('''
-                SELECT DISTINCT hp.user_id 
-                FROM habit_participants hp
-                LEFT JOIN user_habits uh 
-                    ON hp.habit_id = uh.habit_id 
-                    AND hp.user_id = uh.user_id 
-                    AND date(uh.last_check_in) = date('now')
-                WHERE hp.habit_id = ? 
-                    AND (uh.last_check_in IS NULL OR date(uh.last_check_in) != date('now'))
-            ''', (habit_id,))
-            users = await cursor.fetchall()
-            
-        if not users:
-            return
-            
-        mentions = " ".join(f"<@{user[0]}>" for user in users)
-        content = f"{mentions} Time to check in!"
-        embed = discord.Embed(
-            title=f"✨ Time for: {habit_name}",
-            description="Click the button below to check in!",
-            color=discord.Color.green()
-        )
+    async def send_habit_reminder(self, habit_id: int, habit_name: str, channel: discord.TextChannel = None):
+        """Send a reminder for a habit."""
+        if not channel and config.reminder_channel:
+            channel = self.get_channel(int(config.reminder_channel))
         
-        view = HabitButton(habit_id)
-        message = await channel.send(content=content, embed=embed, view=view)
-        self.habit_messages[habit_id] = message.id
+        if not channel:
+            logger.error(f"Could not find reminder channel for habit {habit_name}")
+            return
+            
+        async with self.db_pool.acquire() as db:
+            # Get participants for this habit
+            cursor = await db.execute('''
+                SELECT user_id 
+                FROM habit_participants 
+                WHERE habit_id = ?
+            ''', (habit_id,))
+            participants = await cursor.fetchall()
+            
+            if not participants:
+                logger.warning(f"No participants found for habit {habit_name}")
+                return
+                
+            # Create the reminder embed
+            embed = discord.Embed(
+                title=f"✨ Time for: {habit_name}",
+                description="It's time to work on your habit! Take it one small step at a time.",
+                color=discord.Color.green()
+            )
+            
+            # Mention all participants
+            mentions = ' '.join(f'<@{participant[0]}>' for participant in participants)
+            
+            # Create the button view
+            view = HabitButton(habit_id)
+            
+            # Send the reminder
+            try:
+                message = await channel.send(content=mentions, embed=embed, view=view)
+                self.habit_messages[habit_id] = message.id  # Store message ID instead of message object
+                logger.info(f"Sent reminder for habit {habit_name} to {len(participants)} participants")
+            except Exception as e:
+                logger.error(f"Failed to send reminder for habit {habit_name}: {str(e)}")
     
     async def check_habit_expiry(self, habit_id: int):
         """Check and handle expired habit check-ins."""
@@ -528,14 +549,12 @@ class GentleHabitsBot(commands.Bot):
 
     async def check_restock_reminders(self):
         """Check and send restock reminders."""
-        if not REMINDER_CHANNEL_ID:
-            return
-            
-        channel = self.get_channel(int(REMINDER_CHANNEL_ID))
+        channel = await self.get_reminder_channel()
         if not channel:
             return
             
-        today = datetime.now().date()
+        # Use configured timezone for date calculations
+        today = get_current_time().date()
         reminder_date = today + timedelta(days=3)
         
         async with self.db_pool.acquire() as db:
@@ -565,6 +584,72 @@ class GentleHabitsBot(commands.Bot):
                             )
                     
                     await channel.send(embed=embed)
+
+    async def get_reminder_channel(self) -> Optional[discord.TextChannel]:
+        """Get the reminder channel, with proper error handling."""
+        if not config.reminder_channel:
+            logger.warning("No reminder channel configured")
+            return None
+            
+        # Wait for cache to be ready
+        if not self.is_ready():
+            await self.wait_until_ready()
+            
+        channel = self.get_channel(int(config.reminder_channel))
+        if not channel:
+            logger.error(f"Could not find reminder channel {config.reminder_channel}")
+            return None
+            
+        return channel
+
+    async def check_missed_reminders(self):
+        """Check for reminders that should have been sent in the last hour."""
+        channel = await self.get_reminder_channel()
+        if not channel:
+            return
+            
+        now = get_current_time()
+        one_hour_ago = now - timedelta(hours=1)
+        
+        logger.info(f"Checking for missed reminders between {one_hour_ago.strftime('%H:%M')} and {now.strftime('%H:%M')}")
+        
+        async with self.db_pool.acquire() as db:
+            # Get habits with reminders and participants
+            cursor = await db.execute('''
+                SELECT h.id, h.name, h.reminder_time, h.expiry_time
+                FROM habits h
+                JOIN habit_participants hp ON h.id = hp.habit_id
+                WHERE h.reminder_time IS NOT NULL
+                GROUP BY h.id
+            ''')
+            
+            missed_habits = await cursor.fetchall()
+            
+            if missed_habits:
+                logger.info(f"Found {len(missed_habits)} habits to check for missed reminders")
+                for habit_id, name, reminder_time, expiry_time in missed_habits:
+                    try:
+                        # Convert string times to datetime objects for today
+                        reminder_time_obj = datetime.strptime(reminder_time, "%H:%M").time()
+                        expiry_time_obj = datetime.strptime(expiry_time, "%H:%M").time() if expiry_time else None
+                        
+                        # Create full datetime for today with these times
+                        reminder_dt = datetime.combine(now.date(), reminder_time_obj)
+                        reminder_dt = reminder_dt.replace(tzinfo=now.tzinfo)
+                        
+                        # If the reminder time was within the last hour
+                        if one_hour_ago <= reminder_dt <= now:
+                            # Check if we haven't passed expiry time
+                            current_time = now.time()
+                            if not expiry_time_obj or current_time < expiry_time_obj:
+                                logger.info(f"Sending catch-up reminder for habit: {name} (scheduled for {reminder_time})")
+                                await self.send_habit_reminder(habit_id, name, channel)
+                            else:
+                                logger.info(f"Skipping expired reminder for habit: {name} (scheduled for {reminder_time})")
+                    except Exception as e:
+                        logger.error(f"Error processing missed reminder for habit {name}: {str(e)}")
+            else:
+                logger.info("No habits found that need catch-up reminders")
 
 def validate_time_format(time_str: str) -> bool:
     """Validate time string format and reasonable values"""
@@ -614,6 +699,25 @@ def rate_limit(calls: int, period: int):
             return await func(self, interaction, *args, **kwargs)
         return wrapper
     return decorator
+
+def get_current_time():
+    """Get current time in configured timezone."""
+    import zoneinfo
+    return datetime.now(zoneinfo.ZoneInfo(config.timezone))
+
+def convert_to_local(dt: datetime) -> datetime:
+    """Convert UTC datetime to configured timezone."""
+    import zoneinfo
+    if dt.tzinfo is None:  # If datetime is naive, assume it's UTC
+        dt = dt.replace(tzinfo=zoneinfo.ZoneInfo('UTC'))
+    return dt.astimezone(zoneinfo.ZoneInfo(config.timezone))
+
+def convert_to_utc(dt: datetime) -> datetime:
+    """Convert local datetime to UTC."""
+    import zoneinfo
+    if dt.tzinfo is None:  # If datetime is naive, assume it's in configured timezone
+        dt = dt.replace(tzinfo=zoneinfo.ZoneInfo(config.timezone))
+    return dt.astimezone(zoneinfo.ZoneInfo('UTC'))
 
 if __name__ == '__main__':
     logger.info('🚀 Starting Gentle Habits Bot...')
