@@ -435,7 +435,7 @@ class HabitCommands(app_commands.Group):
     ):
         # Defer the response since API call might take time
         await interaction.response.defer(ephemeral=True)
-
+        
         try:
             # Prepare the prompt based on complexity
             num_steps = {
@@ -497,6 +497,112 @@ Make the steps:
                 ephemeral=True
             )
             print(f"Error in break_down_task: {str(e)}")  # Log the error
+
+    @app_commands.command(name="organise", description="Get an ADHD-friendly organization of multiple tasks with time estimates and gentle steps")
+    @app_commands.describe(
+        tasks="List all your tasks, separated by newlines or commas",
+        energy_level="Your current energy level",
+        time_available="How much time you have available (e.g. '2 hours', '30 minutes')",
+        priority_type="How you want to prioritize tasks"
+    )
+    @app_commands.choices(energy_level=[
+        app_commands.Choice(name="High Energy ⚡", value="high"),
+        app_commands.Choice(name="Medium Energy 💫", value="medium"),
+        app_commands.Choice(name="Low Energy 🌸", value="low"),
+        app_commands.Choice(name="Very Low Energy 🌙", value="very_low")
+    ])
+    @app_commands.choices(priority_type=[
+        app_commands.Choice(name="Urgency First 🚨", value="urgency"),
+        app_commands.Choice(name="Quick Wins First ✨", value="quick_wins"),
+        app_commands.Choice(name="Energy Based 🔋", value="energy"),
+        app_commands.Choice(name="Importance First 🎯", value="importance")
+    ])
+    async def organise_tasks(
+        self,
+        interaction: discord.Interaction,
+        tasks: str,
+        energy_level: app_commands.Choice[str],
+        time_available: str = None,
+        priority_type: app_commands.Choice[str] = None
+    ):
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            # Prepare the prompt for DeepSeek
+            system_prompt = """You are a supportive ADHD coach who helps organize tasks in a manageable way.
+            Your strengths are:
+            1. Breaking down overwhelming task lists into achievable chunks
+            2. Matching tasks to current energy levels
+            3. Providing realistic time estimates
+            4. Suggesting task pairings and body doubles
+            5. Identifying quick wins and momentum builders
+            6. Adding encouraging notes without being overly positive
+            
+            Format your response in clear sections using Discord markdown:
+            - 📋 Task Overview
+            - ⚡ Energy-Matched Tasks
+            - ⏰ Time Estimates
+            - 🎯 First Steps
+            - 💫 Quick Wins
+            - 🌟 Helpful Tips"""
+
+            user_prompt = f"""Here are my tasks to organize:
+{tasks}
+
+My current energy level is: {energy_level.name}
+{f'I have {time_available} available' if time_available else ''}
+{f'Please prioritize by {priority_type.name}' if priority_type else ''}
+
+Please help me organize these tasks in an ADHD-friendly way that:
+1. Matches my current energy level
+2. Includes very specific first steps
+3. Identifies any quick wins
+4. Suggests task pairings or body doubling opportunities
+5. Provides realistic time estimates
+6. Adds encouraging but realistic notes"""
+
+            # Call DeepSeek Chat
+            response = await client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.7,
+                max_tokens=1500
+            )
+
+            breakdown = response.choices[0].message.content
+
+            # Create embed response
+            embed = discord.Embed(
+                title="✨ ADHD-Friendly Task Organization",
+                description=f"Energy Level: {energy_level.name}\n{f'Time Available: {time_available}' if time_available else ''}",
+                color=discord.Color.purple()
+            )
+
+            # Split the response into sections and add them to the embed
+            sections = breakdown.split('\n\n')
+            for section in sections:
+                if section.strip():
+                    # Extract title and content
+                    parts = section.split('\n', 1)
+                    if len(parts) > 1:
+                        title = parts[0].strip('# -')
+                        content = parts[1].strip()
+                        embed.add_field(name=title, value=content, inline=False)
+
+            # Add footer with gentle reminder
+            embed.set_footer(text="Remember: You don't have to do everything at once. Start small and celebrate your progress! 💝")
+
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        except Exception as e:
+            await interaction.followup.send(
+                "❌ Sorry, I had trouble organizing your tasks. Please try again or break your list into smaller chunks.",
+                ephemeral=True
+            )
+            raise e
 
     @app_commands.command(name="motivate", description="Get encouraging reasons and motivation for a task")
     @app_commands.describe(
