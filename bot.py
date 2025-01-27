@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 from functools import wraps
 from typing import Optional
 import sys
+import json
 
 # Initialize colorama for Windows support
 colorama.init()
@@ -41,6 +42,21 @@ class Configuration:
         self.streak_update_interval = int(self._get_optional('STREAK_UPDATE_INTERVAL', '5'))  # minutes
         self.log_level = self._get_optional('LOG_LEVEL', 'INFO')
         self.timezone = self._get_optional('TIMEZONE', 'UTC')  # Default to UTC if not specified
+        self.affirmation_tone = self._get_optional('AFFIRMATION_TONE', 'balanced')  # gentle, balanced, or firm
+        
+        # Load affirmations from JSON file
+        try:
+            with open('affirmations.json', 'r') as f:
+                self.affirmations = json.load(f)
+            if self.affirmation_tone not in self.affirmations:
+                logger.warning(f"Invalid affirmation tone '{self.affirmation_tone}', falling back to 'balanced'")
+                self.affirmation_tone = 'balanced'
+        except FileNotFoundError:
+            logger.error("affirmations.json not found")
+            self.affirmations = {}
+        except json.JSONDecodeError:
+            logger.error("Invalid JSON in affirmations.json")
+            self.affirmations = {}
         
         # Validate timezone
         try:
@@ -268,28 +284,6 @@ class GentleHabitsBot(commands.Bot):
                     UNIQUE(user_id, item_name)
                 )
             ''')
-            
-            # Create affirmations table
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS affirmations (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    message TEXT UNIQUE
-                )
-            ''')
-            
-            # Insert default affirmations
-            default_affirmations = [
-                "Great job! You're doing amazing! 🌟",
-                "Every small step counts - and you just took one! 🎉",
-                "Look at you, taking care of future you! 💪",
-                "That's the way! Keep that momentum going! 🚀",
-                "You're absolutely crushing it! ✨",
-            ]
-            
-            await db.executemany(
-                'INSERT OR IGNORE INTO affirmations (message) VALUES (?)',
-                [(msg,) for msg in default_affirmations]
-            )
             
             await db.commit()
     

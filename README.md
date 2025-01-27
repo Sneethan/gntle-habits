@@ -13,6 +13,7 @@ A Discord bot designed for gentle, ADHD-friendly habit tracking and reminders wi
 - **Colorful Interface**: Beautiful colored console output for easy monitoring
 - **Timezone Support**: Configurable timezone for all reminders and schedules
 - **Reliability Features**: Automatic catch-up for missed reminders after restarts
+- **Configurable Affirmation Tone**: Style of encouragement messages (gentle, balanced, or firm)
 
 ## Requirements
 
@@ -49,6 +50,7 @@ A Discord bot designed for gentle, ADHD-friendly habit tracking and reminders wi
      DISCORD_TOKEN=your_token_here
      REMINDER_CHANNEL_ID=your_channel_id_here
      TIMEZONE=your_timezone_here  # e.g., America/New_York
+     AFFIRMATION_TONE=balanced
      ```
 
 5. Run the bot:
@@ -62,9 +64,13 @@ A Discord bot designed for gentle, ADHD-friendly habit tracking and reminders wi
 - `DISCORD_TOKEN`: Your Discord bot token
 - `REMINDER_CHANNEL_ID`: Channel ID for reminders and streak board
 - `DEEPSEEK_API_KEY`: API key for task breakdown feature
+- `TIMEZONE`: IANA timezone name (defaults to UTC)
+- `AFFIRMATION_TONE`: Style of encouragement messages (defaults to balanced)
+  - `gentle`: Soft, nurturing encouragement
+  - `balanced`: Standard positive reinforcement
+  - `firm`: More assertive, motivational tone
 
 ### Optional Environment Variables
-- `TIMEZONE`: IANA timezone name (defaults to UTC)
 - `DB_PATH`: Database file path (defaults to gentle_habits.db)
 - `MAX_DB_CONNECTIONS`: Maximum database connections (defaults to 5)
 - `STREAK_UPDATE_INTERVAL`: Minutes between streak updates (defaults to 5)
