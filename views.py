@@ -1,6 +1,8 @@
 import discord
 from datetime import datetime
 import aiosqlite
+import random
+import json
 
 class HabitButton(discord.ui.View):
     def __init__(self, habit_id: int):
@@ -52,7 +54,7 @@ class CheckInButton(discord.ui.Button):
                     if (now - last_check).days <= 1:
                         current_streak += 1
                     else:
-                        current_streak = 1
+                        current_streak = 0  # Reset to 0 when streak is broken
                 else:
                     current_streak = 1
                 
@@ -73,13 +75,22 @@ class CheckInButton(discord.ui.Button):
             
             await db.commit()
             
-            # Get random affirmation
-            cursor = await db.execute('SELECT message FROM affirmations ORDER BY RANDOM() LIMIT 1')
-            affirmation = await cursor.fetchone()
-            affirmation = affirmation[0] if affirmation else "Great job! 🌟"
+            # Get random affirmation based on configured tone
+            try:
+                with open('affirmations.json', 'r') as f:
+                    affirmations = json.load(f)
+                tone = interaction.client.config.affirmation_tone
+                if tone not in affirmations:
+                    tone = 'balanced'
+                affirmation = random.choice(affirmations[tone])
+            except (FileNotFoundError, json.JSONDecodeError, KeyError):
+                affirmation = "Great job! 🌟"
             
             # Send ephemeral response
-            message = f"{affirmation}\n{habit_name} streak: {current_streak} day{'s' if current_streak != 1 else ''}! 🔥"
+            if current_streak == 0:
+                message = f"Starting fresh! Remember, every day is a new opportunity! ✨\n{habit_name} streak: Ready to begin! 🌱"
+            else:
+                message = f"{affirmation}\n{habit_name} streak: {current_streak} day{'s' if current_streak != 1 else ''}! 🔥"
             await interaction.response.send_message(message, ephemeral=True)
             
             # Delete the reminder message
