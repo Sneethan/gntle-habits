@@ -451,58 +451,123 @@ class GentleHabitsBot(commands.Bot):
         
         try:
             async with self.db_pool.acquire() as db:
-                # First check if there are any habit participants
-                cursor = await db.execute('''
-                    SELECT COUNT(*) 
-                    FROM habit_participants
-                ''')
-                count = (await cursor.fetchone())[0]
-                
-                if count == 0:
-                    embed.description = "No one has joined any habits yet! Start your journey today! ✨"
-                    embed.add_field(
-                        name="Get Started",
-                        value="Use `/habit create` to begin tracking a new habit!",
-                        inline=False
-                    )
-                    return embed
-                
-                # Get all streaks with user validation, including 0s
-                async with db.execute('''
-                    SELECT DISTINCT hp.user_id, h.name, COALESCE(uh.current_streak, 0) as streak
-                    FROM habit_participants hp
-                    JOIN habits h ON hp.habit_id = h.id
-                    LEFT JOIN user_habits uh ON hp.habit_id = uh.habit_id AND hp.user_id = uh.user_id
-                    ORDER BY streak DESC, h.name
-                    LIMIT 15
-                ''') as cursor:
-                    valid_entries = 0
-                    async for user_id, habit_name, streak in cursor:
-                        try:
-                            user = await self.fetch_user(user_id)
-                            if user:
-                                # Customize emoji based on streak
-                                if streak > 7:
-                                    emoji = "<:fire:1333765377364066384>"  # Fire for week+
-                                elif streak > 0:
-                                    emoji = "<:starstreak:1333765612769509459>"   # Star for active streak
+                try:
+                    await db.execute('BEGIN TRANSACTION')
+                    
+                    # Clean up any invalid streaks (negative values)
+                    await db.execute('''
+                        UPDATE user_habits 
+                        SET current_streak = 1 
+                        WHERE current_streak < 0
+                    ''')
+                    
+                    # Clean up orphaned streak records
+                    await db.execute('''
+                        DELETE FROM user_habits 
+                        WHERE habit_id NOT IN (SELECT id FROM habits)
+                    ''')
+                    
+                    # First check if there are any habit participants
+                    cursor = await db.execute('''
+                        SELECT COUNT(*) 
+                        FROM habit_participants
+                    ''')
+                    count = (await cursor.fetchone())[0]
+                    
+                    if count == 0:
+                        embed.description = "No one has joined any habits yet! Start your journey today! ✨"
+                        embed.add_field(
+                            name="Get Started",
+                            value="Use `/habit create` to begin tracking a new habit!",
+                            inline=False
+                        )
+                        await db.commit()
+                        return embed
+                    
+                    # Get all streaks with user validation, including 0s
+                    # Also include the last check-in time for validation
+                    async with db.execute('''
+                        SELECT DISTINCT 
+                            hp.user_id, 
+                            h.name, 
+                            COALESCE(uh.current_streak, 0) as streak,
+                            uh.last_check_in,
+                            h.expiry_time,
+                            h.id as habit_id
+                        FROM habit_participants hp
+                        JOIN habits h ON hp.habit_id = h.id
+                        LEFT JOIN user_habits uh 
+                            ON hp.habit_id = uh.habit_id 
+                            AND hp.user_id = uh.user_id
+                        ORDER BY streak DESC, h.name
+                        LIMIT 15
+                    ''') as cursor:
+                        valid_entries = 0
+                        now = get_current_time()
+                        today = now.date()
+                        
+                        async for user_id, habit_name, streak, last_check_in, expiry_time, habit_id in cursor:
+                            try:
+                                user = await self.fetch_user(user_id)
+                                if user:
+                                    # Validate streak based on last check-in
+                                    if last_check_in:
+                                        last_check = convert_to_local(datetime.fromisoformat(last_check_in))
+                                        days_since_check = (today - last_check.date()).days
+                                        
+                                        # If past expiry time and no check-in today, count as missed
+                                        if expiry_time and days_since_check == 0:
+                                            current_time = now.time()
+                                            expiry_time_obj = datetime.strptime(expiry_time, "%H:%M").time()
+                                            if current_time > expiry_time_obj:
+                                                days_since_check = 1
+                                        
+                                        # Reset streak if more than 1 day has passed
+                                        if days_since_check > 1:
+                                            streak = 0
+                                            await db.execute(
+                                                '''UPDATE user_habits 
+                                                   SET current_streak = 0 
+                                                   WHERE user_id = ? AND habit_id = ?''',
+                                                (user_id, habit_id)
+                                            )
+                                    
+                                    # Customize emoji based on streak and status
+                                    if streak > 30:
+                                        emoji = "<:fire:1333765377364066384>"  # Fire for month+
+                                    elif streak > 7:
+                                        emoji = "<:starstreak:1333765612769509459>"  # Star for week+
+                                    elif streak > 0:
+                                        emoji = "<:streak_active:1333765397769490514>"  # Active streak
+                                    else:
+                                        emoji = "<:streak_empty:1333765397769490514>"  # Fresh start
+                                    
+                                    # Customize message based on streak
+                                    if streak == 0:
+                                        streak_text = "Ready to start!"
+                                    else:
+                                        streak_text = f"{streak} day{'s' if streak != 1 else ''}"
+                                        if streak in [7, 30, 100, 365]:
+                                            streak_text += " 🎉"
+                                    
+                                    embed.add_field(
+                                        name=f"{user.display_name} - {habit_name}",
+                                        value=f"{emoji} {streak_text}",
+                                        inline=False
+                                    )
+                                    valid_entries += 1
                                 else:
-                                    emoji = "<:streak_empty:1333765397769490514>"   # Seedling for fresh start
-                                
-                                # Customize message based on streak
-                                if streak == 0:
-                                    streak_text = "Ready to start!"
-                                else:
-                                    streak_text = f"{streak} day{'s' if streak != 1 else ''}"
-                                
-                                embed.add_field(
-                                    name=f"{user.display_name} - {habit_name}",
-                                    value=f"{emoji} {streak_text}",
-                                    inline=False
-                                )
-                                valid_entries += 1
-                            else:
-                                # User no longer in server, clean up their entries
+                                    # User no longer in server, clean up their entries
+                                    await db.execute(
+                                        'DELETE FROM user_habits WHERE user_id = ?',
+                                        (user_id,)
+                                    )
+                                    await db.execute(
+                                        'DELETE FROM habit_participants WHERE user_id = ?',
+                                        (user_id,)
+                                    )
+                            except discord.NotFound:
+                                # User no longer exists, clean up their entries
                                 await db.execute(
                                     'DELETE FROM user_habits WHERE user_id = ?',
                                     (user_id,)
@@ -511,34 +576,32 @@ class GentleHabitsBot(commands.Bot):
                                     'DELETE FROM habit_participants WHERE user_id = ?',
                                     (user_id,)
                                 )
-                        except discord.NotFound:
-                            # User no longer exists, clean up their entries
-                            await db.execute(
-                                'DELETE FROM user_habits WHERE user_id = ?',
-                                (user_id,)
-                            )
-                            await db.execute(
-                                'DELETE FROM habit_participants WHERE user_id = ?',
-                                (user_id,)
-                            )
-                        except Exception as e:
-                            logger.error(f"Error processing streak for user {user_id}: {e}")
-                            continue
-                
-                await db.commit()
-                
-                if valid_entries == 0:
-                    embed.description = "No active participants found. Start your journey today! ✨"
-                    embed.add_field(
-                        name="Get Started",
-                        value="Use `/habit create` to begin tracking a new habit!",
-                        inline=False
-                    )
+                            except Exception as e:
+                                logger.error(f"Error processing streak for user {user_id}: {e}")
+                                continue
+                    
+                    if valid_entries == 0:
+                        embed.description = "No active participants found. Start your journey today! ✨"
+                        embed.add_field(
+                            name="Get Started",
+                            value="Use `/habit create` to begin tracking a new habit!",
+                            inline=False
+                        )
+                    
+                    await db.commit()
+                    
+                except Exception as e:
+                    logger.error(f"Database error in create_streak_board_embed: {e}")
+                    await db.rollback()
+                    raise
+                    
         except Exception as e:
             logger.error(f"Error creating streak board embed: {e}")
             embed.description = "⚠️ Error loading streak data. Please try again later."
-            
-        embed.set_footer(text="Updated every 5 minutes")
+        
+        # Add last update time in configured timezone
+        now = get_current_time()
+        embed.set_footer(text=f"Updated at {now.strftime('%I:%M %p')} {config.timezone}")
         return embed
 
     async def check_restock_reminders(self):
