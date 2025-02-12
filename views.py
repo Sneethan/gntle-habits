@@ -172,6 +172,14 @@ class CheckInButton(discord.ui.Button):
                 )
             return
 
+class StreakButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(
+            label="🎯 View Streaks",
+            style=discord.ButtonStyle.primary,
+            custom_id="view_streaks"
+        )
+
 class DailyStreakView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)  # Persistent view
