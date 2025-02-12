@@ -7,6 +7,8 @@ import aiosqlite
 import openai
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
+import aiohttp
+import json
 
 # Load environment variables
 load_dotenv()
@@ -17,6 +19,24 @@ client = AsyncOpenAI(
     api_key=DEEPSEEK_API_KEY,
     base_url="https://api.deepseek.com/v1"  # DeepSeek's OpenAI-compatible endpoint
 )
+
+async def check_deepseek_status():
+    """Check if DeepSeek API is experiencing a major outage."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get('https://status.deepseek.com/api/v2/components.json') as response:
+                if response.status == 200:
+                    data = await response.json()
+                    api_component = next(
+                        (comp for comp in data['components'] 
+                         if comp['name'] == 'API 服务 (API Service)'),
+                        None
+                    )
+                    if api_component and api_component['status'] == 'major_outage':
+                        return False, "DeepSeek API is currently experiencing a major outage. Please try again later."
+                return True, None
+    except Exception as e:
+        return False, f"Unable to check DeepSeek API status: {str(e)}"
 
 class HabitCommands(app_commands.Group):
     def __init__(self, bot):
@@ -437,6 +457,12 @@ class HabitCommands(app_commands.Group):
         await interaction.response.defer(ephemeral=True)
         
         try:
+            # Check DeepSeek API status first
+            api_available, error_message = await check_deepseek_status()
+            if not api_available:
+                await interaction.followup.send(error_message, ephemeral=True)
+                return
+
             # Prepare the prompt based on complexity
             num_steps = {
                 "simple": "3-5",
@@ -528,6 +554,12 @@ Make the steps:
         await interaction.response.defer(ephemeral=True)
         
         try:
+            # Check DeepSeek API status first
+            api_available, error_message = await check_deepseek_status()
+            if not api_available:
+                await interaction.followup.send(error_message, ephemeral=True)
+                return
+
             # Prepare the prompt for DeepSeek
             system_prompt = """You are a supportive ADHD coach who helps organize tasks in a manageable way.
             Your strengths are:
@@ -627,6 +659,12 @@ Please help me organize these tasks in an ADHD-friendly way that:
         await interaction.response.defer(ephemeral=True)
 
         try:
+            # Check DeepSeek API status first
+            api_available, error_message = await check_deepseek_status()
+            if not api_available:
+                await interaction.followup.send(error_message, ephemeral=True)
+                return
+
             # Prepare the prompt based on perspective
             prompts = {
                 "benefits": "Focus on future benefits and positive outcomes. What will they gain? How will this improve their life?",

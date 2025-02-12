@@ -18,6 +18,7 @@ from functools import wraps
 from typing import Optional
 import sys
 import json
+from utils import get_current_time, convert_to_local, convert_to_utc
 
 # Initialize colorama for Windows support
 colorama.init()
@@ -756,25 +757,6 @@ def rate_limit(calls: int, period: int):
             return await func(self, interaction, *args, **kwargs)
         return wrapper
     return decorator
-
-def get_current_time():
-    """Get current time in configured timezone."""
-    import zoneinfo
-    return datetime.now(zoneinfo.ZoneInfo(config.timezone))
-
-def convert_to_local(dt: datetime) -> datetime:
-    """Convert UTC datetime to configured timezone."""
-    import zoneinfo
-    if dt.tzinfo is None:  # If datetime is naive, assume it's UTC
-        dt = dt.replace(tzinfo=zoneinfo.ZoneInfo('UTC'))
-    return dt.astimezone(zoneinfo.ZoneInfo(config.timezone))
-
-def convert_to_utc(dt: datetime) -> datetime:
-    """Convert local datetime to UTC."""
-    import zoneinfo
-    if dt.tzinfo is None:  # If datetime is naive, assume it's in configured timezone
-        dt = dt.replace(tzinfo=zoneinfo.ZoneInfo(config.timezone))
-    return dt.astimezone(zoneinfo.ZoneInfo('UTC'))
 
 if __name__ == '__main__':
     logger.info('🚀 Starting Gentle Habits Bot...')
