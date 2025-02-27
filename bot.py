@@ -19,9 +19,13 @@ from typing import Optional
 import sys
 import json
 from utils import get_current_time, convert_to_local, convert_to_utc
+import aiohttp
 
 # Initialize colorama for Windows support
 colorama.init()
+
+# Import check_deepseek_status from commands
+from commands import client, check_deepseek_status
 
 class ConfigurationError(Exception):
     """Raised when there's an issue with the bot's configuration."""
@@ -47,7 +51,7 @@ class Configuration:
         
         # Load affirmations from JSON file
         try:
-            with open('affirmations.json', 'r') as f:
+            with open('affirmations.json', 'r', encoding='utf-8') as f:
                 self.affirmations = json.load(f)
             if self.affirmation_tone not in self.affirmations:
                 logger.warning(f"Invalid affirmation tone '{self.affirmation_tone}', falling back to 'balanced'")
@@ -286,6 +290,32 @@ class GentleHabitsBot(commands.Bot):
                 )
             ''')
             
+            # Create morning briefing preferences table
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS morning_briefing_prefs (
+                    user_id INTEGER PRIMARY KEY,
+                    opted_in BOOLEAN DEFAULT 0,
+                    location TEXT,
+                    greeting_time TEXT DEFAULT '07:00',
+                    created_at TEXT,
+                    bus_origin TEXT DEFAULT '85 Bastick Street, Rosny, TAS::-42.872160,147.359686',
+                    bus_destination TEXT DEFAULT 'Hobart City Interchange, Hobart, TAS::-42.882473,147.329588'
+                )
+            ''')
+            
+            # Create event countdown table
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS event_countdowns (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    event_name TEXT NOT NULL,
+                    event_date TEXT NOT NULL,
+                    created_at TEXT,
+                    include_in_briefing BOOLEAN DEFAULT 1,
+                    UNIQUE(user_id, event_name)
+                )
+            ''')
+            
             await db.commit()
     
     def create_scheduler(self):
@@ -310,6 +340,13 @@ class GentleHabitsBot(commands.Bot):
             self.update_streak_board,
             CronTrigger(minute=f'*/{config.streak_update_interval}', timezone=config.timezone),
             id='update_streaks'
+        )
+        
+        # Schedule morning briefings - check every minute
+        self.scheduler.add_job(
+            self.send_morning_briefing,
+            CronTrigger(minute='*', timezone=config.timezone),
+            id='morning_briefing'
         )
         
         # Set up habit schedules
@@ -445,7 +482,7 @@ class GentleHabitsBot(commands.Bot):
     async def create_streak_board_embed(self):
         """Create the streak board embed."""
         embed = discord.Embed(
-            title="<:sparkle_star:1333765410608119818> Current Streaks",
+            title="<:starsparkle4x:1342442201954648064> Current Streaks",
             description="Here's how you're doing!",
             color=discord.Color.from_rgb(249, 226, 175)
         )
@@ -535,11 +572,11 @@ class GentleHabitsBot(commands.Bot):
                                     
                                     # Customize emoji based on streak and status
                                     if streak > 30:
-                                        emoji = "<:fire:1333765377364066384>"  # Fire for month+
+                                        emoji = "<:starsparkle4x:1342442201954648064>"  # Fire for month+
                                     elif streak > 7:
-                                        emoji = "<:starstreak:1333765612769509459>"  # Star for week+
+                                        emoji = "<:star4x:1342442178848227378>"  # Star for week+
                                     elif streak > 0:
-                                        emoji = "<:streak_active:1333765397769490514>"  # Active streak
+                                        emoji = "<:star4x:1342442178848227378>"  # Active streak
                                     else:
                                         emoji = "<:streak_empty:1333765397769490514>"  # Fresh start
                                     
@@ -606,43 +643,640 @@ class GentleHabitsBot(commands.Bot):
         return embed
 
     async def check_restock_reminders(self):
-        """Check and send restock reminders."""
-        channel = await self.get_reminder_channel()
-        if not channel:
-            return
+        """Check for restocks that need reminders."""
+        try:
+            logger.info("Checking for restock reminders...")
+            now = get_current_time()
+            three_days_from_now = now + timedelta(days=3)
             
-        # Use configured timezone for date calculations
-        today = get_current_time().date()
-        reminder_date = today + timedelta(days=3)
-        
-        async with self.db_pool.acquire() as db:
-            async with db.execute(
-                'SELECT user_id, item_name FROM restock_items WHERE date(refill_date) = ?',
-                (reminder_date.isoformat(),)
-            ) as cursor:
-                restock_items = []
-                async for row in cursor:
-                    user_id, item_name = row
-                    restock_items.append((user_id, item_name))
+            # Format dates for comparison
+            today = now.date().isoformat()
+            three_days = three_days_from_now.date().isoformat()
+            
+            # Find users with restocks due soon
+            async with self.db_pool.acquire() as db:
+                query = '''
+                    SELECT 
+                        ri.user_id, ri.item_name, ri.refill_date, 
+                        julianday(ri.refill_date) - julianday(?) as days_left
+                    FROM 
+                        restock_items ri 
+                    WHERE 
+                        ri.refill_date BETWEEN ? AND ?
+                    ORDER BY 
+                        ri.refill_date
+                '''
                 
-                if restock_items:
-                    embed = discord.Embed(
-                        title="🔄 Upcoming Restocks",
-                        description="Items that need restocking soon:",
-                        color=discord.Color.blue()
-                    )
+                cursor = await db.execute(query, (today, today, three_days))
+                restock_items = await cursor.fetchall()
+                
+                # Group by user for fewer notifications
+                restock_by_user = {}
+                for user_id, item_name, refill_date, days_left in restock_items:
+                    if user_id not in restock_by_user:
+                        restock_by_user[user_id] = []
                     
-                    for user_id, item_name in restock_items:
+                    days_left = int(days_left)
+                    refill_date_dt = datetime.fromisoformat(refill_date)
+                    
+                    restock_by_user[user_id].append({
+                        'item_name': item_name,
+                        'refill_date': refill_date_dt.strftime('%Y-%m-%d'),
+                        'days_left': days_left
+                    })
+            
+            # Send restock reminders to each user
+            for user_id, items in restock_by_user.items():
+                try:
+                    user = self.get_user(user_id)
+                    if not user:
                         user = await self.fetch_user(user_id)
-                        if user:
+                    
+                    if user:
+                        # Create embed for restock reminder
+                        embed = discord.Embed(
+                            title="🔔 Restock Reminder",
+                            description="The following items will need restocking soon:",
+                            color=discord.Color.orange()
+                        )
+                        
+                        # Add items to the embed
+                        for item in items:
+                            days_text = "TODAY" if item['days_left'] == 0 else f"{item['days_left']} days"
                             embed.add_field(
-                                name=f"{user.display_name}'s {item_name}",
-                                value="Needs restocking in 3 days",
+                                name=item['item_name'],
+                                value=f"📅 Restock by: {item['refill_date']} ({days_text})",
                                 inline=False
                             )
+                        
+                        # Add footer with instructions
+                        embed.set_footer(text="Use /habit restock-done when you've restocked an item")
+                        
+                        # Send DM to the user
+                        await user.send(embed=embed)
+                        logger.info(f"Sent restock reminder to {user.name} for {len(items)} items")
+                    else:
+                        logger.warning(f"Could not find user with ID {user_id} for restock reminder")
+                except Exception as e:
+                    logger.error(f"Error sending restock reminder to user {user_id}: {str(e)}")
+        
+        except Exception as e:
+            logger.error(f"Error in check_restock_reminders: {str(e)}")
+            
+    async def send_morning_briefing(self):
+        """Send morning briefings to opted-in users."""
+        try:
+            now = get_current_time()
+            current_time = now.strftime("%H:%M")
+            
+            # Find users who have opted in for morning briefings and whose greeting time matches current time
+            async with self.db_pool.acquire() as db:
+                cursor = await db.execute(
+                    '''SELECT user_id, location 
+                       FROM morning_briefing_prefs 
+                       WHERE opted_in = 1 AND greeting_time = ?''',
+                    (current_time,)
+                )
+                users = await cursor.fetchall()
+                
+                if not users:
+                    return  # No users to send briefings to at this time
+                
+                logger.info(f"Sending morning briefings to {len(users)} users at {current_time}")
+                
+                for user_data in users:
+                    user_id, location = user_data
+                    try:
+                        # Find the user's Discord object
+                        user = self.get_user(user_id)
+                        if not user:
+                            user = await self.fetch_user(user_id)
+                        
+                        if user:
+                            # Generate and send the briefing
+                            await self._send_user_briefing(user, location)
+                            logger.info(f"Sent morning briefing to {user.name} (ID: {user_id})")
+                        else:
+                            logger.warning(f"Could not find user with ID {user_id} for morning briefing")
+                    except Exception as e:
+                        logger.error(f"Error sending morning briefing to user {user_id}: {str(e)}")
+                
+        except Exception as e:
+            logger.error(f"Error in send_morning_briefing: {str(e)}")
+            
+    async def _send_user_briefing(self, user, location):
+        """Generate and send a morning briefing to a specific user."""
+        try:
+            now = get_current_time()
+            
+            # Get additional user preferences
+            async with self.db_pool.acquire() as db:
+                cursor = await db.execute(
+                    '''SELECT bus_origin, bus_destination 
+                       FROM morning_briefing_prefs 
+                       WHERE user_id = ?''',
+                    (user.id,)
+                )
+                user_prefs = await cursor.fetchone()
+                bus_origin = user_prefs[0] if user_prefs else None
+                bus_destination = user_prefs[1] if user_prefs else None
+            
+            # Create embed for the briefing
+            embed = discord.Embed(
+                title=f"Good Morning, {user.display_name}! 🌅",
+                description=f"It's {now.strftime('%A, %B %d, %Y')}. Here's your morning briefing:",
+                color=discord.Color.gold()
+            )
+            
+            # Add weather information if location is provided
+            if location:
+                weather_info = await self._get_weather_info(location)
+                if weather_info:
+                    embed.add_field(
+                        name="📊 Weather",
+                        value=weather_info,
+                        inline=False
+                    )
+            
+            # Add bus transit information if origin and destination are provided
+            if bus_origin and bus_destination:
+                bus_info = await self._get_bus_info(bus_origin, bus_destination)
+                if bus_info:
+                    embed.add_field(
+                        name="🚌 Next Bus",
+                        value=bus_info,
+                        inline=False
+                    )
+            
+            # Add restock reminders
+            restock_info = await self._get_restock_info(user.id)
+            if restock_info:
+                embed.add_field(
+                    name="📦 Restock Reminders",
+                    value=restock_info,
+                    inline=False
+                )
+            
+            # Add event countdowns
+            countdown_info = await self._get_event_countdowns(user.id)
+            if countdown_info:
+                embed.add_field(
+                    name="📅 Event Countdowns",
+                    value=countdown_info,
+                    inline=False
+                )
+            
+            # Add footer
+            embed.set_footer(text="Have a wonderful day! Use /briefing commands to customize your briefing.")
+            
+            # Send the briefing DM
+            await user.send(embed=embed)
+            
+        except Exception as e:
+            logger.error(f"Error generating briefing for {user.name}: {str(e)}")
+            
+    async def _get_weather_info(self, location):
+        """Get weather information for the specified location."""
+        try:
+            # OpenWeatherMap API call
+            api_key = os.getenv('OPENWEATHERMAP_API_KEY')
+            if not api_key:
+                return "Weather information unavailable (API key not configured)"
+            
+            # Make API call to OpenWeatherMap
+            async with aiohttp.ClientSession() as session:
+                url = f"https://api.openweathermap.org/data/2.5/weather?q={location}&appid={api_key}&units=metric"
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        return f"Weather information unavailable (Error: {response.status})"
                     
-                    await channel.send(embed=embed)
+                    data = await response.json()
+                    
+                    # Extract relevant weather data
+                    weather_description = data['weather'][0]['description']
+                    temp_current = data['main']['temp']
+                    temp_feels_like = data['main']['feels_like']
+                    humidity = data['main']['humidity']
+                    wind_speed = data['wind']['speed']
+                    
+                    # Convert wind speed from m/s to km/h for easier understanding
+                    wind_speed_kmh = wind_speed * 3.6  # 1 m/s = 3.6 km/h
+                    
+                    # Get descriptive text for weather conditions
+                    humidity_desc = self._get_humidity_description(humidity)
+                    wind_desc = self._get_wind_description(wind_speed_kmh)
+                    
+                    # Get clothing recommendations from DeepSeek
+                    clothing_advice = await self._get_clothing_advice(data)
+                    
+                    weather_text = (
+                        f"**{location}**: {weather_description.capitalize()}\n"
+                        f"🌡️ Temperature: {temp_current:.1f}°C (feels like {temp_feels_like:.1f}°C)\n"
+                        f"💧 Humidity: {humidity}% - {humidity_desc}\n"
+                        f"💨 Wind: {wind_speed_kmh:.1f} km/h - {wind_desc}\n\n"
+                        f"**Suggestion**: {clothing_advice}"
+                    )
+                    
+                    return weather_text
+                    
+        except Exception as e:
+            logger.error(f"Error fetching weather: {str(e)}")
+            return "Weather information unavailable"
+            
+    def _get_humidity_description(self, humidity):
+        """Convert numerical humidity value to descriptive text."""
+        if humidity < 30:
+            return "Very dry"
+        elif humidity < 40:
+            return "Dry"
+        elif humidity < 60:
+            return "Comfortable"
+        elif humidity < 70:
+            return "Moderate"
+        elif humidity < 80:
+            return "Humid"
+        else:
+            return "Very humid"
+            
+    def _get_wind_description(self, wind_speed_kmh):
+        """Convert numerical wind speed to descriptive text based on Beaufort scale."""
+        if wind_speed_kmh < 1:
+            return "Calm"
+        elif wind_speed_kmh < 6:
+            return "Light air"
+        elif wind_speed_kmh < 12:
+            return "Light breeze"
+        elif wind_speed_kmh < 20:
+            return "Gentle breeze"
+        elif wind_speed_kmh < 29:
+            return "Moderate breeze"
+        elif wind_speed_kmh < 39:
+            return "Fresh breeze"
+        elif wind_speed_kmh < 50:
+            return "Strong breeze"
+        elif wind_speed_kmh < 62:
+            return "High wind"
+        elif wind_speed_kmh < 75:
+            return "Gale"
+        elif wind_speed_kmh < 89:
+            return "Strong gale"
+        elif wind_speed_kmh < 103:
+            return "Storm"
+        else:
+            return "Violent storm"
+            
+    async def _get_clothing_advice(self, weather_data):
+        """Use DeepSeek to generate clothing recommendations based on weather."""
+        try:
+            deepseek_api_key = os.getenv('DEEPSEEK_API_KEY')
+            if not deepseek_api_key:
+                return "No specific clothing recommendations available."
+            
+            # Check if DeepSeek API is available
+            api_available, error_msg = await check_deepseek_status()
+            if not api_available:
+                return "Clothing recommendations unavailable."
+            
+            # Format weather data for DeepSeek
+            weather_prompt = (
+                f"Weather: {weather_data['weather'][0]['description']}, "
+                f"Temperature: {weather_data['main']['temp']}°C (feels like {weather_data['main']['feels_like']}°C), "
+                f"Humidity: {weather_data['main']['humidity']}%, "
+                f"Wind: {weather_data['wind']['speed']} m/s"
+            )
+            
+            # Get clothing recommendation from DeepSeek
+            prompt = (
+                f"As a helpful assistant, recommend appropriate clothing for the following weather conditions in a single sentence: {weather_prompt}. "
+                f"Make your advice practical and specific to the weather conditions. Keep it under 100 characters."
+            )
+            
+            completion = await client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=120
+            )
+            
+            recommendation = completion.choices[0].message.content.strip()
+            return recommendation
+            
+        except Exception as e:
+            logger.error(f"Error getting clothing advice: {str(e)}")
+            return "No specific clothing recommendations available."
+            
+    async def _get_bus_info(self, origin=None, destination=None):
+        """Get real-time bus transit information."""
+        try:
+            # Use default values if not provided
+            if not origin:
+                origin = "85 Bastick Street, Rosny, TAS::-42.872160,147.359686"
+            if not destination:
+                destination = "Hobart City Interchange, Hobart, TAS::-42.882473,147.329588"
+            
+            # Check if origin and destination have coordinates, if not, geocode them
+            if not self._has_coordinates(origin):
+                origin = await self._geocode_address(origin)
+                if not origin:
+                    return "Bus information unavailable (Could not geocode origin address)"
+            
+            if not self._has_coordinates(destination):
+                destination = await self._geocode_address(destination)
+                if not destination:
+                    return "Bus information unavailable (Could not geocode destination address)"
+                    
+            logger.info(f"Fetching bus info for route: {origin} → {destination}")
+            
+            # Define the transit API URL based on metro_tas_request.md
+            base_url = "https://otp.transitkit.com.au/directions"
+            
+            # Parameters from the request template
+            current_time = int(datetime.now().timestamp())
+            params = {
+                "router": "metrotas",
+                "origin": origin,
+                "destination": destination,
+                "departure_time": str(current_time),  # Current time
+                "alternatives": "true",
+                "key": "AIzaSyAmyAj5G3Rp9df1CBrvBa7dniwMnsrjodY"
+            }
+            
+            # Headers from the request template
+            headers = {
+                "accept": "*/*",
+                "accept-language": "en-US,en;q=0.9,en-AU;q=0.8",
+                "sec-ch-ua": "\"Not(A:Brand\";v=\"99\", \"Microsoft Edge\";v=\"133\", \"Chromium\";v=\"133\"",
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": "\"Windows\"",
+                "sec-fetch-dest": "empty",
+                "sec-fetch-mode": "cors",
+                "sec-fetch-site": "cross-site",
+                "referrer": "https://www.metrotas.com.au/",
+                "referrerPolicy": "strict-origin-when-cross-origin"
+            }
+            
+            # Make API call to get transit information
+            async with aiohttp.ClientSession() as session:
+                logger.debug(f"Making transit API request with params: {params}")
+                async with session.get(base_url, params=params, headers=headers) as response:
+                    if response.status != 200:
+                        logger.error(f"Transit API returned status code {response.status}")
+                        return f"Bus information unavailable (API error: {response.status})"
+                    
+                    data = await response.json()
+                    
+                    if data.get('status') != 'OK':
+                        error_msg = data.get('error_message', 'Unknown error')
+                        logger.error(f"Transit API error: {error_msg}")
+                        return f"Bus information unavailable: {error_msg}"
+                    
+                    if not data.get('routes'):
+                        logger.warning("Transit API returned no routes")
+                        return "No bus routes found between these locations"
+                    
+                    now = datetime.now().timestamp()
+                    upcoming_buses = []
+                    
+                    # Find upcoming buses
+                    for route_idx, route in enumerate(data['routes']):
+                        for leg in route.get('legs', []):
+                            # Make sure we have departure_time and it's in the future
+                            if 'departure_time' not in leg or leg['departure_time'].get('value', 0) <= now:
+                                continue
+                                
+                            departure_time = leg['departure_time']['value']
+                            
+                            # Try to get the route name from transit details if available
+                            route_name = f"Route {route_idx + 1}"
+                            for step in leg.get('steps', []):
+                                if 'transit_details' in step:
+                                    transit_details = step['transit_details']
+                                    if 'line' in transit_details and 'short_name' in transit_details['line']:
+                                        route_name = transit_details['line']['short_name']
+                                    break
+                            
+                            upcoming_buses.append({
+                                'route': route_name,
+                                'departure_time': departure_time,
+                                'departure_text': leg['departure_time']['text'],
+                                'start': leg.get('start_address', 'Unknown'),
+                                'end': leg.get('end_address', 'Unknown'),
+                                'duration': leg.get('duration', {}).get('text', 'Unknown')
+                            })
+                    
+                    if not upcoming_buses:
+                        logger.warning("No upcoming buses found in API response")
+                        return "No upcoming buses found. Try checking a different time or route."
+                    
+                    # Sort by departure time and take the next 3 buses
+                    upcoming_buses.sort(key=lambda x: x['departure_time'])
+                    upcoming_buses = upcoming_buses[:3]  # Get up to 3 buses
+                    
+                    # Format the bus information
+                    bus_info = []
+                    
+                    for i, bus in enumerate(upcoming_buses):
+                        discord_timestamp = f"<t:{int(bus['departure_time'])}:R>"
+                        
+                        # Simplify addresses for better readability
+                        start_simple = self._simplify_address(bus['start'])
+                        end_simple = self._simplify_address(bus['end'])
+                        
+                        if i == 0:
+                            # More detailed info for the next bus
+                            bus_info.append(
+                                f"**Next Bus: {bus['route']}**\n"
+                                f"📍 From **{start_simple}** to **{end_simple}**\n"
+                                f"🕒 Departs at {bus['departure_text']} ({discord_timestamp})\n"
+                                f"⏱️ Duration: {bus['duration']}"
+                            )
+                        else:
+                            # Simpler format for later buses
+                            bus_info.append(
+                                f"**{bus['route']}**: Departs {discord_timestamp}, Duration: {bus['duration']}"
+                            )
+                    
+                    logger.info(f"Found {len(upcoming_buses)} upcoming buses")
+                    return "\n\n".join(bus_info)
+                    
+        except Exception as e:
+            logger.error(f"Error getting bus info: {str(e)}", exc_info=True)
+            return f"Bus information unavailable. Error: {str(e)}"
 
+    def _simplify_address(self, address_string):
+        """Simplify long addresses to make them more readable."""
+        try:
+            if not address_string or address_string == "Unknown":
+                return "Unknown Location"
+                
+            # Remove common long formats and verbose components
+            address = address_string.split(',')
+            
+            # If we have a very short address already, just return it
+            if len(address) == 1:
+                return address_string
+                
+            # For location names, focus on the suburb/locality
+            # Usually the second part is the suburb/locality
+            if len(address) >= 2:
+                location = address[1].strip()
+                
+                # If it's a landmark or common place, it might be in the first part
+                first_part = address[0].strip()
+                if "Interchange" in first_part or "Mall" in first_part or "Centre" in first_part or "Center" in first_part:
+                    location = first_part
+                
+                # If location part is too short, it might be just a postal code - use the first part instead
+                if len(location) <= 5 and len(address) >= 3:
+                    location = address[2].strip()
+                    
+                # Add the state if available for context
+                for part in address:
+                    part = part.strip()
+                    if part in ["TAS", "NSW", "QLD", "VIC", "SA", "WA", "NT", "ACT"]:
+                        if not location.endswith(part):
+                            location += f", {part}"
+                        break
+                
+                return location
+            
+            # Fallback if we can't extract a good location name
+            return address_string
+            
+        except Exception as e:
+            logger.warning(f"Error simplifying address: {str(e)}")
+            return address_string  # Return original if processing fails
+
+    def _has_coordinates(self, location_string):
+        """Check if the location string already has coordinates in the format 'name::lat,lon'."""
+        return '::' in location_string and ',' in location_string.split('::')[1]
+
+    async def _geocode_address(self, address):
+        """Convert an address to coordinates using Google Maps Geocoding API."""
+        try:
+            # Use OpenStreetMap Nominatim as it doesn't require an API key
+            # Note: For production, consider using a geocoding service with an API key for better reliability
+            geocoding_url = f"https://nominatim.openstreetmap.org/search"
+            
+            params = {
+                "q": address,
+                "format": "json",
+                "limit": 1,
+                "addressdetails": 1
+            }
+            
+            headers = {
+                "User-Agent": "GentleHabitsBot/1.0"  # Required by Nominatim
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(geocoding_url, params=params, headers=headers) as response:
+                    if response.status != 200:
+                        logger.error(f"Geocoding API returned status code {response.status}")
+                        return None
+                    
+                    data = await response.json()
+                    
+                    if not data:
+                        logger.warning(f"No geocoding results for address: {address}")
+                        return None
+                    
+                    # Extract latitude and longitude
+                    lat = data[0].get('lat')
+                    lon = data[0].get('lon')
+                    display_name = data[0].get('display_name')
+                    
+                    if not lat or not lon:
+                        logger.warning(f"Missing coordinates in geocoding result for: {address}")
+                        return None
+                    
+                    # Format as required by the transit API: 'name::lat,lon'
+                    formatted_location = f"{display_name}::{lat},{lon}"
+                    logger.info(f"Geocoded '{address}' to '{formatted_location}'")
+                    
+                    return formatted_location
+                    
+        except Exception as e:
+            logger.error(f"Error geocoding address '{address}': {str(e)}", exc_info=True)
+            return None
+            
+    async def _get_restock_info(self, user_id):
+        """Get restock reminders for the user."""
+        try:
+            async with self.db_pool.acquire() as db:
+                cursor = await db.execute(
+                    '''SELECT item_name, refill_date FROM restock_items 
+                       WHERE user_id = ? 
+                       ORDER BY refill_date''',
+                    (user_id,)
+                )
+                items = await cursor.fetchall()
+                
+                if not items:
+                    return None
+                
+                now = get_current_time()
+                
+                restock_text = []
+                for item_name, refill_date in items:
+                    refill_dt = datetime.fromisoformat(refill_date)
+                    days_left = (refill_dt.date() - now.date()).days
+                    
+                    if days_left <= 0:
+                        status = "🚨 **RESTOCK NOW**"
+                    elif days_left <= 3:
+                        status = f"⚠️ **{days_left} day{'s' if days_left != 1 else ''} left**"
+                    else:
+                        status = f"✅ {days_left} day{'s' if days_left != 1 else ''} left"
+                    
+                    restock_text.append(f"{item_name}: {status}")
+                
+                return "\n".join(restock_text) if restock_text else None
+                
+        except Exception as e:
+            logger.error(f"Error getting restock info: {str(e)}")
+            return "Restock information unavailable"
+            
+    async def _get_event_countdowns(self, user_id):
+        """Get event countdowns for the user."""
+        try:
+            async with self.db_pool.acquire() as db:
+                cursor = await db.execute(
+                    '''SELECT event_name, event_date FROM event_countdowns 
+                       WHERE user_id = ? AND include_in_briefing = 1 
+                       ORDER BY event_date''',
+                    (user_id,)
+                )
+                events = await cursor.fetchall()
+                
+                if not events:
+                    return None
+                
+                now = get_current_time()
+                
+                countdown_text = []
+                for event_name, event_date in events:
+                    event_dt = datetime.fromisoformat(event_date)
+                    days_left = (event_dt.date() - now.date()).days
+                    
+                    if days_left < 0:
+                        continue  # Skip past events
+                    elif days_left == 0:
+                        status = "🎉 **TODAY!**"
+                    elif days_left == 1:
+                        status = "⏰ **TOMORROW!**"
+                    else:
+                        status = f"📆 {days_left} days"
+                    
+                    # Add Discord timestamp
+                    discord_timestamp = f"<t:{int(event_dt.timestamp())}:R>"
+                    countdown_text.append(f"**{event_name}**: {status} ({discord_timestamp})")
+                
+                return "\n".join(countdown_text) if countdown_text else None
+                
+        except Exception as e:
+            logger.error(f"Error getting event countdowns: {str(e)}")
+            return "Event countdown information unavailable"
+        
     async def get_reminder_channel(self) -> Optional[discord.TextChannel]:
         """Get the reminder channel, with proper error handling."""
         if not config.reminder_channel:
@@ -661,53 +1295,70 @@ class GentleHabitsBot(commands.Bot):
         return channel
 
     async def check_missed_reminders(self):
-        """Check for reminders that should have been sent in the last hour."""
-        channel = await self.get_reminder_channel()
-        if not channel:
-            return
+        """Check for reminders that should have been sent while the bot was offline."""
+        try:
+            now = get_current_time()
+            one_hour_ago = now - timedelta(hours=1)
             
-        now = get_current_time()
-        one_hour_ago = now - timedelta(hours=1)
-        
-        logger.info(f"Checking for missed reminders between {one_hour_ago.strftime('%H:%M')} and {now.strftime('%H:%M')}")
-        
-        async with self.db_pool.acquire() as db:
-            # Get habits with reminders and participants
-            cursor = await db.execute('''
-                SELECT h.id, h.name, h.reminder_time, h.expiry_time
-                FROM habits h
-                JOIN habit_participants hp ON h.id = hp.habit_id
-                WHERE h.reminder_time IS NOT NULL
-                GROUP BY h.id
-            ''')
+            # Format times for SQL comparison
+            now_time = now.strftime("%H:%M")
+            one_hour_ago_time = one_hour_ago.strftime("%H:%M")
             
-            missed_habits = await cursor.fetchall()
-            
-            if missed_habits:
-                logger.info(f"Found {len(missed_habits)} habits to check for missed reminders")
-                for habit_id, name, reminder_time, expiry_time in missed_habits:
-                    try:
-                        # Convert string times to datetime objects for today
-                        reminder_time_obj = datetime.strptime(reminder_time, "%H:%M").time()
-                        expiry_time_obj = datetime.strptime(expiry_time, "%H:%M").time() if expiry_time else None
+            # Get habits that should have been reminded in the last hour
+            async with self.db_pool.acquire() as db:
+                query = '''
+                    SELECT id, name, reminder_time, expiry_time FROM habits 
+                    WHERE reminder_time BETWEEN ? AND ?
+                '''
+                
+                # Handle case where the range crosses midnight
+                if one_hour_ago_time > now_time:
+                    cursor = await db.execute(
+                        'SELECT id, name, reminder_time, expiry_time FROM habits WHERE reminder_time >= ? OR reminder_time <= ?',
+                        (one_hour_ago_time, now_time)
+                    )
+                else:
+                    cursor = await db.execute(query, (one_hour_ago_time, now_time))
+                
+                habits = await cursor.fetchall()
+                
+                # Get a reference to the reminder channel
+                channel = await self.get_reminder_channel()
+                if not channel:
+                    logger.error("Could not find reminder channel for missed reminder check")
+                    return
+                
+                for habit in habits:
+                    habit_id, name, reminder_time, expiry_time = habit
+                    
+                    # Parse times into datetime objects for comparison
+                    reminder_dt = datetime.strptime(reminder_time, "%H:%M").replace(
+                        year=now.year, month=now.month, day=now.day, 
+                        tzinfo=now.tzinfo
+                    )
+                    
+                    # Adjust if the reminder was yesterday
+                    if reminder_dt > now:
+                        reminder_dt -= timedelta(days=1)
+                    
+                    expiry_dt = datetime.strptime(expiry_time, "%H:%M").replace(
+                        year=now.year, month=now.month, day=now.day,
+                        tzinfo=now.tzinfo
+                    )
+                    
+                    # Adjust if expiry is tomorrow
+                    if expiry_dt < reminder_dt:
+                        expiry_dt += timedelta(days=1)
+                    
+                    # Only send if not expired
+                    if now < expiry_dt:
+                        logger.info(f"Sending catch-up reminder for habit: {name}")
+                        await self.send_habit_reminder(habit_id, name, channel)
+                    else:
+                        logger.info(f"Skipping expired catch-up reminder for habit: {name}")
                         
-                        # Create full datetime for today with these times
-                        reminder_dt = datetime.combine(now.date(), reminder_time_obj)
-                        reminder_dt = reminder_dt.replace(tzinfo=now.tzinfo)
-                        
-                        # If the reminder time was within the last hour
-                        if one_hour_ago <= reminder_dt <= now:
-                            # Check if we haven't passed expiry time
-                            current_time = now.time()
-                            if not expiry_time_obj or current_time < expiry_time_obj:
-                                logger.info(f"Sending catch-up reminder for habit: {name} (scheduled for {reminder_time})")
-                                await self.send_habit_reminder(habit_id, name, channel)
-                            else:
-                                logger.info(f"Skipping expired reminder for habit: {name} (scheduled for {reminder_time})")
-                    except Exception as e:
-                        logger.error(f"Error processing missed reminder for habit {name}: {str(e)}")
-            else:
-                logger.info("No habits found that need catch-up reminders")
+        except Exception as e:
+            logger.error(f"Error in check_missed_reminders: {str(e)}")
 
 def validate_time_format(time_str: str) -> bool:
     """Validate time string format and reasonable values"""
