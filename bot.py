@@ -482,7 +482,7 @@ class GentleHabitsBot(commands.Bot):
     async def create_streak_board_embed(self):
         """Create the streak board embed."""
         embed = discord.Embed(
-            title="<:starsparkle4x:1342442201954648064> Current Streaks",
+            title="<:sparkle_star:1333765410608119818> Current Streaks",
             description="Here's how you're doing!",
             color=discord.Color.from_rgb(249, 226, 175)
         )
@@ -572,11 +572,11 @@ class GentleHabitsBot(commands.Bot):
                                     
                                     # Customize emoji based on streak and status
                                     if streak > 30:
-                                        emoji = "<:starsparkle4x:1342442201954648064>"  # Fire for month+
+                                        emoji = "<:fire:1333765377364066384>"  # Fire for month+
                                     elif streak > 7:
-                                        emoji = "<:star4x:1342442178848227378>"  # Star for week+
+                                        emoji = "<:fire:1333765377364066384>"  # Fire for week+
                                     elif streak > 0:
-                                        emoji = "<:star4x:1342442178848227378>"  # Active streak
+                                        emoji = "<:starstreak:1333765612769509459>"  # Active streak
                                     else:
                                         emoji = "<:streak_empty:1333765397769490514>"  # Fresh start
                                     
