@@ -6,7 +6,7 @@ import json
 import logging
 from utils import get_current_time, convert_to_local, convert_to_utc
 
-# Set up logging
+# Just get the logger without adding handlers
 logger = logging.getLogger('gentle_habits')
 
 class HabitButton(discord.ui.View):

@@ -118,12 +118,21 @@ class ColoredFormatter(logging.Formatter):
         record.msg = f"{color}[{record.levelname}]{Style.RESET_ALL} {record.msg}"
         return super().format(record)
 
-# Set up logging
+# Set up logging - with check to prevent duplicate handlers
 logger = logging.getLogger('gentle_habits')
 logger.setLevel(logging.INFO)
+
+# Clear existing handlers to prevent duplicates
+if logger.hasHandlers():
+    logger.handlers.clear()
+
+# Add our handler with the colored formatter
 handler = logging.StreamHandler()
 handler.setFormatter(ColoredFormatter('%(asctime)s %(message)s', datefmt='%H:%M:%S'))
 logger.addHandler(handler)
+
+# Prevent propagation to the root logger to avoid duplicate logs
+logger.propagate = False
 
 # Load environment variables
 TOKEN = os.getenv('DISCORD_TOKEN')
