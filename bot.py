@@ -20,6 +20,7 @@ import sys
 import json
 from utils import get_current_time, convert_to_local, convert_to_utc
 import aiohttp
+import traceback
 
 # Initialize colorama for Windows support
 colorama.init()
@@ -1047,11 +1048,37 @@ class GentleHabitsBot(commands.Bot):
                             
                             # Try to get the route name from transit details if available
                             route_name = f"Route {route_idx + 1}"
+                            nearest_stop_info = ""
+                            walking_distance = ""
+                            departure_stop = ""
+                            
+                            # Parse steps to find walking instructions and nearest stop
+                            first_step = leg.get('steps', [])[0] if leg.get('steps') else None
+                            if first_step and first_step.get('travel_mode') == 'WALKING':
+                                # Extract walking distance to the stop
+                                walking_distance = first_step.get('distance', {}).get('text', '')
+                                
+                                # Parse HTML instructions to get stop information
+                                html_instructions = first_step.get('html_instructions', '')
+                                # Use regex to extract the stop name from HTML
+                                import re
+                                stop_match = re.search(r'<b>(Stop [^<]+|[^<]+Stop)</b>', html_instructions)
+                                if stop_match:
+                                    nearest_stop_info = stop_match.group(1)
+                                
+                                # Try to get the departure stop name from transit details
+                                second_step = leg.get('steps', [])[1] if len(leg.get('steps', [])) > 1 else None
+                                if second_step and second_step.get('transit_details', {}).get('departure_stop', {}).get('name'):
+                                    departure_stop = second_step['transit_details']['departure_stop']['name']
+                            
+                            # Get transit details from the steps
                             for step in leg.get('steps', []):
                                 if 'transit_details' in step:
                                     transit_details = step['transit_details']
                                     if 'line' in transit_details and 'short_name' in transit_details['line']:
                                         route_name = transit_details['line']['short_name']
+                                    if not departure_stop and 'departure_stop' in transit_details:
+                                        departure_stop = transit_details['departure_stop'].get('name', '')
                                     break
                             
                             upcoming_buses.append({
@@ -1060,7 +1087,9 @@ class GentleHabitsBot(commands.Bot):
                                 'departure_text': leg['departure_time']['text'],
                                 'start': leg.get('start_address', 'Unknown'),
                                 'end': leg.get('end_address', 'Unknown'),
-                                'duration': leg.get('duration', {}).get('text', 'Unknown')
+                                'duration': leg.get('duration', {}).get('text', 'Unknown'),
+                                'walking_distance': walking_distance,
+                                'nearest_stop': nearest_stop_info or departure_stop
                             })
                     
                     if not upcoming_buses:
@@ -1083,24 +1112,35 @@ class GentleHabitsBot(commands.Bot):
                         
                         if i == 0:
                             # More detailed info for the next bus
+                            stop_info = ""
+                            if bus['nearest_stop']:
+                                stop_info = f"🚏 **{bus['nearest_stop']}**"
+                                if bus['walking_distance']:
+                                    stop_info += f" (Walking distance: {bus['walking_distance']})\n"
+                                else:
+                                    stop_info += "\n"
+                            
                             bus_info.append(
                                 f"**Next Bus: {bus['route']}**\n"
                                 f"📍 From **{start_simple}** to **{end_simple}**\n"
+                                f"{stop_info}"
                                 f"🕒 Departs at {bus['departure_text']} ({discord_timestamp})\n"
                                 f"⏱️ Duration: {bus['duration']}"
                             )
                         else:
                             # Simpler format for later buses
+                            stop_info = f" from {bus['nearest_stop']}" if bus['nearest_stop'] else ""
                             bus_info.append(
-                                f"**{bus['route']}**: Departs {discord_timestamp}, Duration: {bus['duration']}"
+                                f"**{bus['route']}**{stop_info}: Departs {discord_timestamp}, Duration: {bus['duration']}"
                             )
                     
                     logger.info(f"Found {len(upcoming_buses)} upcoming buses")
                     return "\n\n".join(bus_info)
                     
         except Exception as e:
-            logger.error(f"Error getting bus info: {str(e)}", exc_info=True)
-            return f"Bus information unavailable. Error: {str(e)}"
+            logger.error(f"Error fetching bus information: {str(e)}")
+            traceback.print_exc()
+            return "Bus information unavailable. Please try again later."
 
     def _simplify_address(self, address_string):
         """Simplify long addresses to make them more readable."""
