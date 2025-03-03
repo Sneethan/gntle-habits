@@ -10,7 +10,7 @@ import random
 from dotenv import load_dotenv
 import logging
 import asyncio
-from views import DailyStreakView, HabitButton
+from views import DailyStreakView, HabitButton, DebtTrackerView
 import colorama
 from colorama import Fore, Style
 from contextlib import asynccontextmanager
@@ -190,7 +190,11 @@ class GentleHabitsBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
-        super().__init__(command_prefix='!', intents=intents)
+        super().__init__(
+            command_prefix='!', 
+            intents=intents, 
+            shard_count=None  # Auto sharding - Discord.py will determine the right number of shards
+        )
         self.scheduler = None
         self.db_path = config.db_path
         self.db_pool = DatabasePool(self.db_path, config.max_db_connections)
@@ -212,11 +216,33 @@ class GentleHabitsBot(commands.Bot):
             logger.info(f'🌟 Connected as {self.user}')
             logger.info(f'🔧 Running Discord.py version: {discord.__version__}')
             
+            # Log shard information
+            if self.shard_count:
+                logger.info(f'🔄 This instance is shard #{self.shard_id} of {self.shard_count}')
+                logger.info(f'🌐 Shard is handling {len(self.guilds)} servers')
+            else:
+                logger.info(f'🌐 Bot is connected to {len(self.guilds)} servers')
+            
             try:
-                synced = await self.tree.sync()
-                logger.info(f'✨ Successfully synced {len(synced)} command(s)')
+                # Add error handling for command registration rate limits
+                try:
+                    synced = await self.tree.sync()
+                    logger.info(f'✨ Successfully synced {len(synced)} command(s)')
+                except discord.HTTPException as e:
+                    if e.status == 429:  # Rate limit error
+                        retry_after = e.retry_after if hasattr(e, 'retry_after') else 60
+                        logger.warning(f'⚠️ Discord API rate limit hit when syncing commands. Retry after {retry_after} seconds.')
+                        logger.info('📌 The bot will continue to function, but new commands may not be available until the rate limit expires.')
+                    else:
+                        logger.error(f'❌ HTTP error when syncing commands: {e.status} - {e.text}')
+                        logger.error(traceback.format_exc())
+                except Exception as e:
+                    logger.error(f'❌ Failed to sync commands: {e}')
+                    logger.error(traceback.format_exc())
             except Exception as e:
-                logger.error(f'❌ Failed to sync commands: {e}')
+                logger.error(f'❌ Error during command registration: {e}')
+                logger.error(traceback.format_exc())
+                logger.info('📌 The bot will continue to function, but commands may not be available.')
             
             # Send initial streak board
             try:
@@ -232,16 +258,68 @@ class GentleHabitsBot(commands.Bot):
             except Exception as e:
                 logger.error(f'❌ Failed to check missed reminders: {e}')
             
+            # Initialize debt tracker dashboard
+            try:
+                # Add a timeout to prevent hanging
+                create_dashboard_task = asyncio.create_task(self.update_debt_dashboard())
+                try:
+                    await asyncio.wait_for(create_dashboard_task, timeout=15.0)  # 15 second timeout
+                    logger.info("💰 Debt tracker dashboard initialized")
+                except asyncio.TimeoutError:
+                    logger.warning("⏳ Debt tracker dashboard initialization taking too long - will be created later by scheduler")
+            except Exception as e:
+                logger.error(f"❌ Failed to initialize debt tracker dashboard: {str(e)}")
+                logger.error(traceback.format_exc())
+            
             logger.info(f'🎉 Bot is now ready to help build gentle habits!')
+            
+            # Add a summary of the bot status
+            server_count = len(self.guilds)
+            user_count = sum(guild.member_count for guild in self.guilds)
+            
+            logger.info(f'📊 Bot Status Summary:')
+            logger.info(f'   • Servers: {server_count}')
+            logger.info(f'   • Users: {user_count}')
+            logger.info(f'   • Sharding: {"Enabled" if self.shard_count else "Disabled"}')
+            logger.info(f'   • Database: {self.db_path}')
+            logger.info(f'   • Timezone: {config.timezone}')
 
     async def setup_hook(self):
-        """Initialize bot components."""
-        logger.info("Initializing bot components...")
+        """Set up extensions and initialize the database."""
+        logger.info("Setting up the bot...")
+        
+        # Log sharding information
+        if self.shard_count:
+            logger.info(f"Bot is using {self.shard_count} shards")
+            logger.info(f"Current shard ID: {self.shard_id}")
+        else:
+            logger.info("Bot is running in a single shard")
+        
+        # Initialize database pool
         await self.db_pool.initialize()
+        
+        # Initialize database tables
         await self.init_db()
-        await self.load_extension('commands')
+        
+        # Load commands extension
+        try:
+            # Check if commands module is already loaded
+            if not 'commands' in self.extensions:
+                await self.load_extension('commands')
+                logger.info("Commands extension loaded")
+        except Exception as e:
+            logger.error(f"Error loading commands extension: {str(e)}")
+            logger.error(traceback.format_exc())
+        
+        # Initialize habit scheduler
         await self.setup_scheduler()
-        logger.info("Bot initialization complete")
+        
+        # Register persistent views first, before trying to create dashboards
+        self.add_view(DailyStreakView())
+        self.add_view(DebtTrackerView())
+        logger.info("Registered persistent views")
+        
+        logger.info("Bot setup complete.")
 
     async def close(self):
         """Override close to properly cleanup resources."""
@@ -326,6 +404,36 @@ class GentleHabitsBot(commands.Bot):
                 )
             ''')
             
+            # Create debt accounts table
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS debt_accounts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    current_balance REAL NOT NULL,
+                    initial_balance REAL NOT NULL,
+                    interest_rate REAL DEFAULT 0.0,
+                    due_date TEXT,
+                    description TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    is_public BOOLEAN DEFAULT 1,
+                    UNIQUE(user_id, name)
+                )
+            ''')
+            
+            # Create debt payments table
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS debt_payments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id INTEGER NOT NULL,
+                    amount REAL NOT NULL,
+                    payment_date TEXT NOT NULL,
+                    description TEXT,
+                    FOREIGN KEY (account_id) REFERENCES debt_accounts(id)
+                )
+            ''')
+            
             await db.commit()
     
     def create_scheduler(self):
@@ -357,6 +465,13 @@ class GentleHabitsBot(commands.Bot):
             self.send_morning_briefing,
             CronTrigger(minute='*', timezone=config.timezone),
             id='morning_briefing'
+        )
+        
+        # Schedule debt tracker dashboard updates
+        self.scheduler.add_job(
+            self.update_debt_dashboard,
+            CronTrigger(hour="*/4", minute=0, timezone=config.timezone),  # Update every 4 hours
+            id='debt_tracker_update'
         )
         
         # Set up habit schedules
@@ -439,7 +554,7 @@ class GentleHabitsBot(commands.Bot):
     async def check_habit_expiry(self, habit_id: int):
         """Check and handle expired habit check-ins."""
         if habit_id in self.habit_messages:
-            channel = self.get_channel(int(REMINDER_CHANNEL_ID))
+            channel = await self.get_reminder_channel()
             if channel:
                 try:
                     message = await channel.fetch_message(self.habit_messages[habit_id])
@@ -450,14 +565,15 @@ class GentleHabitsBot(commands.Bot):
     
     async def update_streak_board(self):
         """Update the persistent streak board."""
-        if not REMINDER_CHANNEL_ID:
+        if not config.reminder_channel:
             logger.warning("No reminder channel ID set - streak board updates disabled")
             return
             
         try:
-            channel = self.get_channel(int(REMINDER_CHANNEL_ID))
+            # Use the improved get_reminder_channel method instead of direct access
+            channel = await self.get_reminder_channel()
             if not channel:
-                logger.error(f"Could not find channel with ID {REMINDER_CHANNEL_ID}")
+                logger.error("Could not access the reminder channel for streak board updates")
                 return
 
             embed = await self.create_streak_board_embed()
@@ -1334,13 +1450,30 @@ class GentleHabitsBot(commands.Bot):
             
         # Wait for cache to be ready
         if not self.is_ready():
+            logger.info("Waiting for bot to be ready before accessing channels...")
             await self.wait_until_ready()
+            logger.info("Bot is now ready, attempting to get reminder channel")
             
-        channel = self.get_channel(int(config.reminder_channel))
+        # Try to get the channel by ID
+        channel_id = int(config.reminder_channel)
+        channel = self.get_channel(channel_id)
+        
+        # If channel not found in cache, try to fetch it
         if not channel:
-            logger.error(f"Could not find reminder channel {config.reminder_channel}")
-            return None
-            
+            try:
+                logger.info(f"Channel {channel_id} not in cache, attempting to fetch it")
+                channel = await self.fetch_channel(channel_id)
+                logger.info(f"Successfully fetched channel {channel.name} ({channel_id})")
+            except discord.NotFound:
+                logger.error(f"Channel with ID {channel_id} not found")
+                return None
+            except discord.Forbidden:
+                logger.error(f"Bot does not have permission to access channel with ID {channel_id}")
+                return None
+            except Exception as e:
+                logger.error(f"Could not find reminder channel {channel_id}: {str(e)}")
+                return None
+                
         return channel
 
     async def check_missed_reminders(self):
@@ -1409,6 +1542,255 @@ class GentleHabitsBot(commands.Bot):
         except Exception as e:
             logger.error(f"Error in check_missed_reminders: {str(e)}")
 
+    async def get_debt_tracker_channel(self) -> Optional[discord.TextChannel]:
+        """Get the debt tracker channel from the configured ID."""
+        channel_id = os.getenv('DEBT_TRACKER_CHANNEL_ID')
+        if not channel_id:
+            logger.warning("DEBT_TRACKER_CHANNEL_ID not set in environment variables")
+            return None
+            
+        # Wait for cache to be ready
+        if not self.is_ready():
+            logger.info("Waiting for bot to be ready before accessing debt tracker channel...")
+            await self.wait_until_ready()
+            logger.info("Bot is now ready, attempting to get debt tracker channel")
+            
+        try:
+            channel_id = int(channel_id)
+            channel = self.get_channel(channel_id)
+            if not channel:
+                try:
+                    logger.info(f"Debt tracker channel {channel_id} not in cache, attempting to fetch it")
+                    channel = await self.fetch_channel(channel_id)
+                    logger.info(f"Successfully fetched debt tracker channel {channel.name} ({channel_id})")
+                except discord.NotFound:
+                    logger.error(f"Channel with ID {channel_id} not found")
+                    return None
+                except discord.Forbidden:
+                    logger.error(f"Bot doesn't have permission to access channel with ID {channel_id}")
+                    return None
+                except Exception as e:
+                    logger.error(f"Error fetching channel with ID {channel_id}: {str(e)}")
+                    return None
+            return channel
+        except ValueError:
+            logger.error(f"Invalid DEBT_TRACKER_CHANNEL_ID: {channel_id} - not a valid integer")
+            return None
+        except Exception as e:
+            logger.error(f"Error getting debt tracker channel: {str(e)}")
+            return None
+    
+    async def update_debt_dashboard(self):
+        """Update or create the debt tracker dashboard in the dedicated channel."""
+        logger.info("Updating debt tracker dashboard...")
+        
+        try:
+            channel = await self.get_debt_tracker_channel()
+            if not channel:
+                logger.warning("Debt tracker channel not configured or not found.")
+                return
+                
+            # Create embed dashboard
+            embed = await self.create_debt_dashboard_embed()
+            
+            # Look for existing dashboard message to update with timeout protection
+            dashboard_found = False
+            try:
+                # Use async iteration instead of flatten() for Discord.py v2.x compatibility
+                messages = []
+                history_task = asyncio.create_task(self._get_recent_messages(channel, 50))
+                messages = await asyncio.wait_for(history_task, timeout=15.0)  # 15 second timeout for history fetch
+                
+                for message in messages:
+                    if message.author == self.user and message.embeds:
+                        for msg_embed in message.embeds:
+                            if msg_embed.title and "Debt Tracker Dashboard" in msg_embed.title:
+                                try:
+                                    view = DebtTrackerView()
+                                    await message.edit(embed=embed, view=view)
+                                    logger.info("Debt tracker dashboard updated successfully.")
+                                    dashboard_found = True
+                                    break
+                                except discord.Forbidden:
+                                    logger.error("Bot doesn't have permission to edit the debt tracker message.")
+                                except discord.HTTPException as e:
+                                    logger.error(f"HTTP error updating debt tracker dashboard: {e.status} - {e.text}")
+                                except Exception as e:
+                                    logger.error(f"Error updating debt tracker dashboard: {str(e)}")
+                    
+                    if dashboard_found:
+                        break
+            except asyncio.TimeoutError:
+                logger.warning("Timeout while fetching channel history for debt dashboard")
+            except Exception as e:
+                logger.error(f"Error while searching for existing debt dashboard: {str(e)}")
+            
+            # No existing message found or update failed, create a new one
+            if not dashboard_found:
+                try:
+                    view = DebtTrackerView()
+                    await channel.send(embed=embed, view=view)
+                    logger.info("New debt tracker dashboard created.")
+                except discord.Forbidden:
+                    logger.error("Bot doesn't have permission to send messages in the debt tracker channel.")
+                except discord.HTTPException as e:
+                    logger.error(f"HTTP error creating debt tracker dashboard: {e.status} - {e.text}")
+                except Exception as e:
+                    logger.error(f"Error creating debt tracker dashboard: {str(e)}")
+        except Exception as e:
+            logger.error(f"Error in update_debt_dashboard: {str(e)}")
+            logger.error(traceback.format_exc())
+            
+    async def create_debt_dashboard_embed(self):
+        """Create an embed for the debt tracker dashboard."""
+        embed = discord.Embed(
+            title="🌟 Debt Tracker Dashboard 🌟",
+            description="Track your progress in paying down debts. Use the buttons below to update your accounts.",
+            color=discord.Color.teal()
+        )
+        
+        embed.add_field(
+            name="‎",
+            value="**Public Debt Accounts**\n" +
+                  "*Everyone can see these accounts, and celebrate progress together!*",
+            inline=False
+        )
+        
+        # Get all public debt accounts
+        async with self.db_pool.acquire() as db:
+            cursor = await db.execute('''
+                SELECT 
+                    da.id, da.user_id, da.name, da.current_balance, da.initial_balance, 
+                    da.interest_rate, da.due_date, da.description, u.user_tag
+                FROM debt_accounts da
+                LEFT JOIN (
+                    SELECT DISTINCT user_id, user_id || '#0000' as user_tag FROM debt_accounts
+                ) u ON da.user_id = u.user_id
+                WHERE da.is_public = 1
+                ORDER BY da.current_balance DESC
+            ''')
+            
+            public_accounts = await cursor.fetchall()
+        
+        # Group accounts by user
+        user_accounts = {}
+        for account in public_accounts:
+            user_id = account[1]
+            if user_id not in user_accounts:
+                user_accounts[user_id] = []
+            user_accounts[user_id].append(account)
+            
+        # Add user accounts to embed
+        for user_id, accounts in user_accounts.items():
+            user = self.get_user(user_id)
+            # If we can't get the user object, fetch it (might not be in cache)
+            if not user:
+                try:
+                    user = await self.fetch_user(user_id)
+                except discord.NotFound:
+                    # If we still can't find the user, show Anonymous User instead of ID
+                    user_display_name = "Anonymous User"
+                except Exception as e:
+                    logger.error(f"Error fetching user {user_id}: {e}")
+                    user_display_name = "Anonymous User"
+                else:
+                    user_display_name = user.display_name
+            else:
+                user_display_name = user.display_name
+            
+            account_list = []
+            total_current = 0
+            total_initial = 0
+            
+            for account in accounts:
+                account_id = account[0]
+                name = account[2]
+                current_balance = account[3]
+                initial_balance = account[4]
+                interest_rate = account[5]
+                
+                total_current += current_balance
+                total_initial += initial_balance
+                
+                # Calculate percentage paid
+                paid_percentage = 0
+                if initial_balance > 0:
+                    paid_percentage = 100 - (current_balance / initial_balance * 100)
+                
+                # Create progress bar
+                progress_bar = self._create_progress_bar(paid_percentage)
+                
+                # Format interest rate display
+                interest_display = f" ({interest_rate}%)" if interest_rate > 0 else ""
+                
+                account_list.append(
+                    f"**{name}**{interest_display} - `${current_balance:,.2f}/${initial_balance:,.2f}`\n"
+                    f"{progress_bar} ({paid_percentage:.1f}% paid)"
+                )
+            
+            # Calculate total progress
+            total_percentage = 0
+            if total_initial > 0:
+                total_percentage = 100 - (total_current / total_initial * 100)
+                
+            total_progress_bar = self._create_progress_bar(total_percentage)
+            
+            # Add user's accounts to embed
+            user_accounts_text = "\n\n".join(account_list)
+            
+            embed.add_field(
+                name=f"👤 {user_display_name}",
+                value=f"{user_accounts_text}\n\n" +
+                      f"**TOTAL:** `${total_current:,.2f}/${total_initial:,.2f}`\n" +
+                      f"{total_progress_bar} ({total_percentage:.1f}% paid)",
+                inline=False
+            )
+            
+        if not public_accounts:
+            embed.add_field(
+                name="No Debt Accounts Yet",
+                value="Use `/debt add` to create your first debt account!",
+                inline=False
+            )
+            
+        # Add instructions
+        embed.add_field(
+            name="📋 Commands",
+            value=(
+                "• `/debt add` - Add a new debt account\n"
+                "• `/debt list` - List your debt accounts\n"
+                "• `/debt payment` - Record a payment\n"
+                "• `/debt edit` - Update an account\n"
+                "• `/debt delete` - Remove an account"
+            ),
+            inline=False
+        )
+        
+        embed.set_footer(text=f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')} • Use the buttons below to update your accounts")
+        
+        return embed
+        
+    def _create_progress_bar(self, percentage):
+        """Create a visual progress bar based on percentage."""
+        if percentage < 0:
+            percentage = 0
+        elif percentage > 100:
+            percentage = 100
+            
+        filled_blocks = int(percentage / 10)
+        empty_blocks = 10 - filled_blocks
+        
+        return "🟩" * filled_blocks + "⬜" * empty_blocks
+
+    async def _get_recent_messages(self, channel, limit=50):
+        """Helper method to get recent messages from a channel in a Discord.py v2.x compatible way."""
+        messages = []
+        async for message in channel.history(limit=limit):
+            messages.append(message)
+            if len(messages) >= limit:
+                break
+        return messages
+
 def validate_time_format(time_str: str) -> bool:
     """Validate time string format and reasonable values"""
     try:
@@ -1460,5 +1842,20 @@ def rate_limit(calls: int, period: int):
 
 if __name__ == '__main__':
     logger.info('🚀 Starting Gentle Habits Bot...')
-    bot = GentleHabitsBot()
-    bot.run(config.token) 
+    
+    try:
+        bot = GentleHabitsBot()
+        logger.info('✅ Bot instance created, attempting to connect to Discord...')
+        bot.run(config.token, reconnect=True)
+    except discord.errors.LoginFailure:
+        logger.critical('❌ Invalid Discord token provided. Please check your .env file.')
+    except discord.errors.PrivilegedIntentsRequired:
+        logger.critical('❌ Required privileged intents are not enabled for this bot. Please check the Discord Developer Portal.')
+    except discord.errors.HTTPException as e:
+        if e.status == 429:  # Rate limit error
+            logger.critical(f'❌ Discord API rate limit reached. Please wait {e.retry_after} seconds before restarting.')
+        else:
+            logger.critical(f'❌ HTTP Error connecting to Discord: {e}')
+    except Exception as e:
+        logger.critical(f'❌ Failed to start the bot: {str(e)}')
+        logger.critical(traceback.format_exc()) 
