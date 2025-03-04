@@ -2421,25 +2421,48 @@ class DebtCommands(app_commands.Group):
         current: str,
     ) -> list[app_commands.Choice[str]]:
         """Autocomplete for user's debt account names."""
-        async with aiosqlite.connect(self.bot.db_path) as db:
-            cursor = await db.execute(
-                'SELECT name FROM debt_accounts WHERE user_id = ? ORDER BY name',
-                (interaction.user.id,)
-            )
-            accounts = await cursor.fetchall()
-        
-        account_names = [account[0] for account in accounts]
-        
-        # Filter based on current input
-        filtered_names = [
-            name for name in account_names
-            if current.lower() in name.lower()
-        ]
-        
-        return [
-            app_commands.Choice(name=name, value=name)
-            for name in filtered_names[:25]  # Discord limits choices to 25
-        ]
+        try:
+            # Print debug info
+            print(f"Autocomplete called for user {interaction.user.id} with current: '{current}'")
+            
+            # Get all debt accounts for this user
+            async with aiosqlite.connect(self.bot.db_path) as db:
+                # First check if the user has any accounts
+                cursor = await db.execute(
+                    'SELECT COUNT(*) FROM debt_accounts WHERE user_id = ?',
+                    (interaction.user.id,)
+                )
+                count = await cursor.fetchone()
+                print(f"User has {count[0]} debt accounts")
+                
+                if count and count[0] == 0:
+                    # User has no accounts, return empty list
+                    return []
+                
+                # Get the accounts
+                cursor = await db.execute(
+                    'SELECT name FROM debt_accounts WHERE user_id = ? AND name LIKE ?',
+                    (interaction.user.id, f"%{current}%")
+                )
+                accounts = await cursor.fetchall()
+                print(f"Found {len(accounts)} matching accounts for user")
+            
+            # Create choices
+            choices = []
+            for account in accounts:
+                name = account[0]
+                choices.append(app_commands.Choice(name=name, value=name))
+                if len(choices) >= 25:  # Discord limit
+                    break
+            
+            print(f"Returning {len(choices)} choices for autocomplete")
+            return choices
+            
+        except Exception as e:
+            print(f"Error in debt account autocomplete: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return []
     
     @app_commands.command(name="list", description="List all your debt accounts and balances")
     @app_commands.describe(
@@ -2637,7 +2660,7 @@ class DebtCommands(app_commands.Group):
                 "An error occurred while recording your payment. Please try again.",
                 ephemeral=True
             )
-            
+    
     @app_commands.command(name="edit", description="Edit an existing debt account")
     @app_commands.describe(
         account_name="Name of the debt account to edit",
@@ -2816,8 +2839,9 @@ class DebtCommands(app_commands.Group):
     async def delete_debt(
         self,
         interaction: discord.Interaction,
-        account_name: str
+        account_name: str,
     ):
+        """Delete a debt account and all associated payments."""
         try:
             async with aiosqlite.connect(self.bot.db_path) as db:
                 await db.execute('BEGIN TRANSACTION')
@@ -2950,5 +2974,80 @@ class DebtCommands(app_commands.Group):
             logging.error(f"Error getting payment history: {e}")
             await interaction.response.send_message(
                 "An error occurred while retrieving payment history. Please try again.",
+                ephemeral=True
+            )
+    
+    @app_commands.command(name="charge", description="Add a charge or fee to increase a debt account balance")
+    @app_commands.autocomplete(account_name=account_name_autocomplete)
+    @app_commands.describe(
+        account_name="Name of the debt account",
+        amount="Amount of the charge/fee to add to the debt",
+        description="Optional description of what this charge is for"
+    )
+    async def add_charge(
+        self, 
+        interaction: discord.Interaction, 
+        account_name: str, 
+        amount: float, 
+        description: str = None
+    ):
+        """Add a charge or fee to a debt account, increasing its balance."""
+        try:
+            # Validate inputs
+            if amount <= 0:
+                await interaction.response.send_message(
+                    "The charge amount must be greater than zero.",
+                    ephemeral=True
+                )
+                return
+                
+            # Find the debt account
+            async with aiosqlite.connect(interaction.client.db_path) as db:
+                cursor = await db.execute(
+                    'SELECT id, current_balance FROM debt_accounts WHERE user_id = ? AND name = ?',
+                    (interaction.user.id, account_name)
+                )
+                account = await cursor.fetchone()
+                
+                if not account:
+                    await interaction.response.send_message(
+                        f"You don't have a debt account named '{account_name}'.",
+                        ephemeral=True
+                    )
+                    return
+                    
+                account_id, current_balance = account
+                
+                # Calculate the new balance
+                new_balance = current_balance + amount
+                now = datetime.now().isoformat()
+                
+                # Record the charge as a negative payment
+                await db.execute(
+                    'INSERT INTO debt_payments (account_id, amount, payment_date, description) VALUES (?, ?, ?, ?)',
+                    (account_id, -amount, now, description or f"Charge/Fee: ${amount:,.2f}")
+                )
+                
+                # Update the current balance
+                await db.execute(
+                    'UPDATE debt_accounts SET current_balance = ?, updated_at = ? WHERE id = ?',
+                    (new_balance, now, account_id)
+                )
+                
+                await db.commit()
+                
+                # Send confirmation message
+                await interaction.response.send_message(
+                    f"Added a charge of ${amount:,.2f} to '{account_name}'. New balance: ${new_balance:,.2f}",
+                    ephemeral=True
+                )
+                
+                # Update the debt dashboard
+                await self.bot.update_debt_dashboard()
+                
+        except Exception as e:
+            logging.error(f"Error adding charge to debt account: {e}")
+            await interaction.response.send_message(
+                "An error occurred while adding the charge to your debt account. Please try again.",
                 ephemeral=True
             )
