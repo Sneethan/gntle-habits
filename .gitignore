@@ -15,3 +15,11 @@
 *.sqlite-wal
 gentle_habits.db
 pycache/
+
+*/__pycache__
+*/pycache
+*/pycache/*
+*/pycache/*/*
+*/pycache/*/*/*
+*/pycache/*/*/*/*
+*/pycache/*/*/*/*/*
