@@ -10,7 +10,9 @@ import random
 from dotenv import load_dotenv
 import logging
 import asyncio
-from views import DailyStreakView, HabitButton, DebtTrackerView
+
+from openai import AsyncOpenAI
+from assets.views.views import DailyStreakView, HabitButton, DebtTrackerView
 import colorama
 from colorama import Fore, Style
 from contextlib import asynccontextmanager
@@ -18,16 +20,40 @@ from functools import wraps
 from typing import Optional
 import sys
 import json
-from utils import get_current_time, convert_to_local, convert_to_utc
+from assets.utils.utils import get_current_time, convert_to_local, convert_to_utc
 import aiohttp
 import traceback
 
 # Initialize colorama for Windows support
 colorama.init()
 
-# Import check_deepseek_status from commands
-from commands import client, check_deepseek_status
+load_dotenv()
+DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
 
+# Configure OpenAI client for DeepSeek
+client = AsyncOpenAI(
+    api_key=DEEPSEEK_API_KEY,
+    base_url="https://api.deepseek.com/v1"  # DeepSeek's OpenAI-compatible endpoint
+)
+
+async def check_deepseek_status():
+    """Check if DeepSeek API is experiencing a major outage."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get('https://status.deepseek.com/api/v2/components.json') as response:
+                if response.status == 200:
+                    data = await response.json()
+                    api_component = next(
+                        (comp for comp in data['components'] 
+                         if comp['name'] == 'API 服务 (API Service)'),
+                        None
+                    )
+                    if api_component and api_component['status'] == 'major_outage':
+                        return False, "DeepSeek API is currently experiencing a major outage. Please try again later."
+                return True, None
+    except Exception as e:
+        return False, f"Unable to check DeepSeek API status: {str(e)}"
+    
 class ConfigurationError(Exception):
     """Raised when there's an issue with the bot's configuration."""
     pass
@@ -43,7 +69,7 @@ class Configuration:
         
         # Optional settings with defaults
         self.reminder_channel = self._get_optional('REMINDER_CHANNEL_ID')
-        self.db_path = self._get_optional('DB_PATH', 'gentle_habits.db')
+        self.db_path = self._get_optional('DB_PATH', 'assets/database/gentle_habits/gentle_habits.db')
         self.max_db_connections = int(self._get_optional('MAX_DB_CONNECTIONS', '5'))
         self.streak_update_interval = int(self._get_optional('STREAK_UPDATE_INTERVAL', '5'))  # minutes
         self.log_level = self._get_optional('LOG_LEVEL', 'INFO')
@@ -300,16 +326,6 @@ class GentleHabitsBot(commands.Bot):
         
         # Initialize database tables
         await self.init_db()
-        
-        # Load commands extension
-        try:
-            # Check if commands module is already loaded
-            if not 'commands' in self.extensions:
-                await self.load_extension('commands')
-                logger.info("Commands extension loaded")
-        except Exception as e:
-            logger.error(f"Error loading commands extension: {str(e)}")
-            logger.error(traceback.format_exc())
         
         # Initialize habit scheduler
         await self.setup_scheduler()
@@ -1840,12 +1856,28 @@ def rate_limit(calls: int, period: int):
         return wrapper
     return decorator
 
+
+async def load_cogs() -> None:
+    """
+    The code in this function is executed whenever the bot will start.
+    """
+    for file in os.listdir(f"./cogs"):
+        if file.endswith(".py"):
+            extension = file[:-3]
+            try:
+                await bot.load_extension(f"cogs.{extension}")
+                print(f"Loaded cog '{extension}'")
+            except Exception as e:
+                exception = f"{type(e).__name__}: {e}"
+                print(f"Failed to load extension {extension}\n{exception}")
+
+
 if __name__ == '__main__':
     logger.info('🚀 Starting Gentle Habits Bot...')
-    
     try:
         bot = GentleHabitsBot()
         logger.info('✅ Bot instance created, attempting to connect to Discord...')
+        asyncio.run(load_cogs())
         bot.run(config.token, reconnect=True)
     except discord.errors.LoginFailure:
         logger.critical('❌ Invalid Discord token provided. Please check your .env file.')

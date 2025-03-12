@@ -4,7 +4,7 @@ import aiosqlite
 import random
 import json
 import logging
-from utils import get_current_time, convert_to_local, convert_to_utc
+from assets.utils.utils import get_current_time, convert_to_local, convert_to_utc
 
 # Just get the logger without adding handlers
 logger = logging.getLogger('gentle_habits')
