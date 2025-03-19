@@ -10,6 +10,8 @@ A Discord bot designed for gentle, ADHD-friendly habit tracking and reminders wi
 - **Restock Tracking**: Never run out of important items with 3-day advance reminders
 - **Positive Reinforcement**: Receive supportive affirmations from a curated list when completing tasks
 - **Multi-User Support**: Track habits and streaks for multiple users in your server
+- **Morning Briefings**: Daily personalized briefings with weather, transit, and traffic information
+- **Google Maps Integration**: Real-time traffic analysis and transit information with deep links to Google Maps
 - **Colorful Interface**: Beautiful colored console output for easy monitoring
 - **Timezone Support**: Configurable timezone for all reminders and schedules
 - **Reliability Features**: Automatic catch-up for missed reminders after restarts
@@ -51,6 +53,7 @@ A Discord bot designed for gentle, ADHD-friendly habit tracking and reminders wi
      REMINDER_CHANNEL_ID=your_channel_id_here
      TIMEZONE=your_timezone_here  # e.g., America/New_York
      AFFIRMATION_TONE=balanced
+     GOOGLE_MAPS_API_KEY=your_google_maps_api_key_here
      ```
 
 5. Run the bot:
@@ -64,6 +67,11 @@ A Discord bot designed for gentle, ADHD-friendly habit tracking and reminders wi
 - `DISCORD_TOKEN`: Your Discord bot token
 - `REMINDER_CHANNEL_ID`: Channel ID for reminders and streak board
 - `DEEPSEEK_API_KEY`: API key for task breakdown feature
+- `GOOGLE_MAPS_API_KEY`: Google Maps API key for transit and traffic information
+  - Required API services: Routes API and Places API
+  - The Routes API has replaced the legacy Directions API
+  - Enable these in the Google Cloud Console before using
+  - Make sure billing is set up for your Google Cloud project
 - `TIMEZONE`: IANA timezone name (defaults to UTC)
 - `AFFIRMATION_TONE`: Style of encouragement messages (defaults to balanced)
   - `gentle`: Soft, nurturing encouragement
@@ -108,6 +116,30 @@ A Discord bot designed for gentle, ADHD-friendly habit tracking and reminders wi
 - `/habit restock-list`: View your restock items
 - `/habit restock-remove <item_name>`: Remove a restock item
 - `/habit restock-done <item_name>`: Mark an item as restocked
+
+### Morning Briefing System
+- `/briefing opt-in <time> <location>`: Subscribe to daily briefings at specified time
+- `/briefing opt-out`: Unsubscribe from daily briefings
+- `/briefing set-time <time>`: Update briefing delivery time
+- `/briefing set-location <location>`: Update your location for weather information
+- `/briefing set-bus-origin <nickname> <address>`: Set your transit journey starting point
+- `/briefing set-bus-destination <nickname> <address>`: Set your transit journey destination
+- `/briefing status`: Check your current briefing settings
+- `/briefing test`: Send a test briefing to check your settings
+- `/briefing countdown-add <event> <date>`: Add event countdowns to your briefings
+
+## Morning Briefings
+
+The Morning Briefing system provides personalized daily information including:
+
+- **Weather Forecasts**: Current conditions and daily forecast for your location
+- **Transit Information**: Bus schedule information using Google Maps Routes API (the modern replacement for Directions API)
+- **Traffic Analysis**: Real-time traffic conditions for driving between your set locations
+- **Google Maps Deep Links**: Open your route directly in Google Maps on your phone
+- **Restock Reminders**: Notifications about items that need restocking soon
+- **Event Countdowns**: Countdown to upcoming important events
+
+Briefings are sent via direct message at your specified time each day, and can be customized to include only the information you need.
 
 ## Design Philosophy
 

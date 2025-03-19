@@ -1,0 +1,126 @@
+{
+  "name": "Gentle Habits Discord Bot",
+  "description": "A Discord bot designed for gentle, ADHD-friendly habit tracking and reminders with minimal friction. The bot helps users maintain daily streaks, manage restock reminders, and provides positive reinforcement through a colorful and encouraging interface.",
+  "rules": [
+    {
+      "description": "This is a modern discord.py bot built with cogs to better separate code and maintain speed and reliability.",
+      "pattern": "**/*"
+    },
+    {
+      "description": "The bot uses a cog-based architecture where each cog is a separate module with its own commands and functionality.",
+      "pattern": "cogs/*.py"
+    },
+    {
+      "description": "The main bot.py file contains the core bot class, database connection management, and scheduler setup.",
+      "pattern": "bot.py"
+    },
+    {
+      "description": "The bot uses SQLite for persistent storage of habits, streaks, and other user data.",
+      "pattern": "*.db"
+    },
+    {
+      "description": "Environment variables are stored in .env file and loaded with python-dotenv.",
+      "pattern": ".env"
+    },
+    {
+      "description": "The bot uses APScheduler for scheduling reminders and recurring tasks.",
+      "pattern": "**/*.py"
+    },
+    {
+      "description": "The bot uses colorama for colorful console output.",
+      "pattern": "**/*.py"
+    },
+    {
+      "description": "The bot uses aiosqlite for asynchronous database operations.",
+      "pattern": "**/*.py"
+    },
+    {
+      "description": "The bot uses OpenAI/DeepSeek API for task breakdown and other AI-powered features.",
+      "pattern": "**/*.py"
+    },
+    {
+      "description": "The bot uses discord.py's app_commands for slash commands.",
+      "pattern": "**/*.py"
+    },
+    {
+      "description": "The Habits cog contains commands for habit tracking, streak management, and restock reminders.",
+      "pattern": "cogs/Habits.py"
+    },
+    {
+      "description": "The Debt cog contains commands for debt tracking and management.",
+      "pattern": "cogs/Debt.py"
+    },
+    {
+      "description": "The Briefing cog contains commands for daily briefings and information summaries.",
+      "pattern": "cogs/Briefing.py"
+    },
+    {
+      "description": "The bot uses custom views and buttons for interactive UI elements.",
+      "pattern": "assets/views/*.py"
+    },
+    {
+      "description": "Utility functions are stored in the utils directory.",
+      "pattern": "utils/*.py"
+    },
+    {
+      "description": "Configuration settings are stored in the config directory.",
+      "pattern": "config/*.py"
+    },
+    {
+      "description": "The bot uses a database pool for efficient connection management.",
+      "pattern": "bot.py"
+    },
+    {
+      "description": "The bot has a robust error handling system with custom exceptions.",
+      "pattern": "**/*.py"
+    },
+    {
+      "description": "The bot uses timezone-aware scheduling for reminders.",
+      "pattern": "**/*.py"
+    },
+    {
+      "description": "The bot has a restart recovery system to handle missed reminders after restarts.",
+      "pattern": "bot.py"
+    },
+    {
+      "description": "The bot uses affirmations.json for positive reinforcement messages.",
+      "pattern": "affirmations.json"
+    },
+    {
+      "description": "The bot uses custom embeds for rich message formatting.",
+      "pattern": "**/*.py"
+    },
+    {
+      "description": "The bot uses autocomplete for command parameters.",
+      "pattern": "cogs/*.py"
+    },
+    {
+      "description": "The bot uses rate limiting for certain commands to prevent abuse.",
+      "pattern": "bot.py"
+    },
+    {
+      "description": "The bot uses context managers for database connections.",
+      "pattern": "bot.py"
+    },
+    {
+      "description": "The bot uses asyncio for asynchronous operations.",
+      "pattern": "**/*.py"
+    },
+    {
+      "description": "The bot uses custom formatters for logging.",
+      "pattern": "bot.py"
+    },
+    {
+      "description": "The bot uses a Configuration class for managing environment variables and settings.",
+      "pattern": "bot.py"
+    },
+    {
+      "description": "The bot uses custom views for interactive UI elements like streak tracking and debt management.",
+      "pattern": "assets/views/views.py"
+    },
+    {
+      "description": "The bot uses utility functions for time conversion between UTC and local timezone.",
+      "pattern": "assets/utils/utils.py"
+    }
+  ]
+} 

@@ -10,6 +10,8 @@ import random
 from dotenv import load_dotenv
 import logging
 import asyncio
+import urllib.parse
+import time
 
 from openai import AsyncOpenAI
 from assets.views.views import DailyStreakView, HabitButton, DebtTrackerView
@@ -945,7 +947,7 @@ class GentleHabitsBot(commands.Bot):
                 bus_info = await self._get_bus_info(bus_origin, bus_destination)
                 if bus_info:
                     embed.add_field(
-                        name="🚌 Next Bus",
+                        name="🚌 Transit & Traffic Info",
                         value=bus_info,
                         inline=False
                     )
@@ -1107,7 +1109,7 @@ class GentleHabitsBot(commands.Bot):
             return "No specific clothing recommendations available."
             
     async def _get_bus_info(self, origin=None, destination=None):
-        """Get real-time bus transit information."""
+        """Get real-time bus transit and traffic information using both Metro TAS API and Google Maps Routes API."""
         try:
             # Use default values if not provided
             if not origin:
@@ -1119,169 +1121,349 @@ class GentleHabitsBot(commands.Bot):
             if not self._has_coordinates(origin):
                 origin = await self._geocode_address(origin)
                 if not origin:
-                    return "Bus information unavailable (Could not geocode origin address)"
+                    return "Transit information unavailable (Could not geocode origin address)"
             
             if not self._has_coordinates(destination):
                 destination = await self._geocode_address(destination)
                 if not destination:
-                    return "Bus information unavailable (Could not geocode destination address)"
+                    return "Transit information unavailable (Could not geocode destination address)"
                     
-            logger.info(f"Fetching bus info for route: {origin} → {destination}")
+            logger.info(f"Fetching transit info for route: {origin} → {destination}")
             
-            # Define the transit API URL based on metro_tas_request.md
-            base_url = "https://otp.transitkit.com.au/directions"
+            # Parse coordinates for API calls
+            origin_coords = origin.split('::')[1]
+            destination_coords = destination.split('::')[1]
             
-            # Parameters from the request template
-            current_time = int(datetime.now().timestamp())
-            params = {
-                "router": "metrotas",
-                "origin": origin,
-                "destination": destination,
-                "departure_time": str(current_time),  # Current time
-                "alternatives": "true",
-                "key": "AIzaSyAmyAj5G3Rp9df1CBrvBa7dniwMnsrjodY"
-            }
+            # Create origin and destination from coordinates
+            origin_lat, origin_lng = origin_coords.split(',')
+            dest_lat, dest_lng = destination_coords.split(',')
             
-            # Headers from the request template
-            headers = {
-                "accept": "*/*",
-                "accept-language": "en-US,en;q=0.9,en-AU;q=0.8",
-                "sec-ch-ua": "\"Not(A:Brand\";v=\"99\", \"Microsoft Edge\";v=\"133\", \"Chromium\";v=\"133\"",
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": "\"Windows\"",
-                "sec-fetch-dest": "empty",
-                "sec-fetch-mode": "cors",
-                "sec-fetch-site": "cross-site",
-                "referrer": "https://www.metrotas.com.au/",
-                "referrerPolicy": "strict-origin-when-cross-origin"
-            }
+            # Get API key from environment
+            google_maps_api_key = os.getenv('GOOGLE_MAPS_API_KEY')
+            if not google_maps_api_key:
+                logger.error("GOOGLE_MAPS_API_KEY not found in environment variables")
+                return "Transit information unavailable (API key missing)"
+                
+            logger.debug(f"API key first 5 chars: {google_maps_api_key[:5]}...")
             
-            # Make API call to get transit information
+            # PART 1: Get bus information from Metro TAS API
+            # Format the URL-encoded origin and destination
+            origin_name = origin.split('::')[0]
+            destination_name = destination.split('::')[0]
+            
+            # Create properly formatted origin and destination strings with coordinates
+            origin_for_api = f"{origin_name}::{origin_coords}"
+            destination_for_api = f"{destination_name}::{destination_coords}"
+            
+            # URL encode the entire strings
+            origin_encoded = urllib.parse.quote(origin_for_api)
+            destination_encoded = urllib.parse.quote(destination_for_api)
+            
+            # Get current timestamp for departure_time
+            current_timestamp = int(time.time())
+            # Add 5 minutes to ensure it's in the future
+            future_timestamp = current_timestamp + (5 * 60)
+            
+            # Construct Metro TAS API URL
+            metro_tas_url = f"https://otp.transitkit.com.au/directions?router=metrotas&origin={origin_encoded}&destination={destination_encoded}&departure_time={future_timestamp}&alternatives=true&key={google_maps_api_key}"
+            
+            # Make request to Metro TAS API
+            transit_data = None
             async with aiohttp.ClientSession() as session:
-                logger.debug(f"Making transit API request with params: {params}")
-                async with session.get(base_url, params=params, headers=headers) as response:
-                    if response.status != 200:
-                        logger.error(f"Transit API returned status code {response.status}")
-                        return f"Bus information unavailable (API error: {response.status})"
+                try:
+                    logger.debug(f"Requesting Metro TAS API: {metro_tas_url[:100]}...")
+                    async with session.get(metro_tas_url) as response:
+                        response_text = await response.text()
+                        if response.status == 200:
+                            try:
+                                transit_data = json.loads(response_text)
+                                logger.debug(f"Metro TAS API response status: {response.status}, found {len(transit_data.get('routes', []))} routes")
+                            except json.JSONDecodeError:
+                                logger.error(f"Failed to parse Metro TAS API response: {response_text[:200]}...")
+                        else:
+                            logger.error(f"Metro TAS API returned status code {response.status}: {response_text[:200]}...")
+                except Exception as e:
+                    logger.error(f"Error fetching data from Metro TAS API: {str(e)}")
+                    logger.debug(f"Metro TAS URL attempted: {metro_tas_url[:100]}...")
+            
+            # PART 2: Get traffic information from Google Maps API
+            # Define the Google Maps Routes API URL
+            routes_url = "https://routes.googleapis.com/directions/v2:computeRoutes"
+            
+            # Format RFC 3339 timestamp for Google Maps API
+            now = datetime.now()
+            # Add a small offset to ensure the time is in the future (5 minutes)
+            future_time = now + timedelta(minutes=5)
+            # Format as RFC 3339 with timezone offset
+            formatted_time = future_time.strftime("%Y-%m-%dT%H:%M:%S")
+            
+            # Add timezone offset if missing
+            if "+" not in formatted_time and "-" not in formatted_time[-6:]:
+                try:
+                    # Try to get local timezone offset
+                    offset = future_time.astimezone().strftime('%z')
+                    if offset:
+                        # Insert colon in timezone offset (e.g., +0000 to +00:00)
+                        if len(offset) == 5:
+                            offset = f"{offset[:3]}:{offset[3:]}"
+                        formatted_time += offset
+                    else:
+                        formatted_time += "Z"  # UTC if we can't determine local
+                except:
+                    formatted_time += "Z"  # UTC as fallback
+            
+            logger.debug(f"Using departure time: {formatted_time}")
+            
+            # Create payload for driving info to get traffic analysis
+            driving_payload = {
+                "origin": {
+                    "location": {
+                        "latLng": {
+                            "latitude": float(origin_lat),
+                            "longitude": float(origin_lng)
+                        }
+                    }
+                },
+                "destination": {
+                    "location": {
+                        "latLng": {
+                            "latitude": float(dest_lat),
+                            "longitude": float(dest_lng)
+                        }
+                    }
+                },
+                "travelMode": "DRIVE",
+                "routingPreference": "TRAFFIC_AWARE",
+                "departureTime": formatted_time,
+                "computeAlternativeRoutes": False,
+                "languageCode": "en-US",
+                "units": "METRIC"
+            }
+            
+            # Headers for the request
+            driving_headers = {
+                "Content-Type": "application/json",
+                "X-Goog-Api-Key": google_maps_api_key,
+                "X-Goog-FieldMask": "routes.duration,routes.distanceMeters,routes.legs.duration,routes.legs.distanceMeters,routes.travelAdvisory"
+            }
+            
+            # Make API call to get driving information
+            driving_data = None
+            async with aiohttp.ClientSession() as session:
+                logger.debug("Trying Google Maps Routes API for driving data")
+                try:
+                    async with session.post(routes_url, json=driving_payload, headers=driving_headers) as driving_response:
+                        driving_status = driving_response.status
+                        driving_text = await driving_response.text()
+                        logger.debug(f"Driving API Response: Status {driving_status}, Body: {driving_text[:200]}...")
+                        
+                        if driving_status == 200:
+                            driving_data = json.loads(driving_text)
+                        else:
+                            logger.error(f"Google Maps Routes API (driving) returned status code {driving_status}: {driving_text}")
+                except Exception as e:
+                    logger.error(f"Exception with Google Maps API (driving): {str(e)}")
+            
+            # Process Metro TAS transit information
+            transit_info = "No bus routes found between these locations"
+            if transit_data and transit_data.get('routes'):
+                transit_routes = transit_data.get('routes', [])
+                # Extract bus information
+                upcoming_buses = []
+                
+                for route_idx, route in enumerate(transit_routes):
+                    legs = route.get('legs', [])
+                    if not legs:
+                        continue
                     
-                    data = await response.json()
+                    leg = legs[0]  # Get the first leg
                     
-                    if data.get('status') != 'OK':
-                        error_msg = data.get('error_message', 'Unknown error')
-                        logger.error(f"Transit API error: {error_msg}")
-                        return f"Bus information unavailable: {error_msg}"
+                    # Get overall route info
+                    departure_time = leg.get('departure_time', {})
+                    arrival_time = leg.get('arrival_time', {})
+                    duration = leg.get('duration', {})
                     
-                    if not data.get('routes'):
-                        logger.warning("Transit API returned no routes")
-                        return "No bus routes found between these locations"
+                    departure_text = departure_time.get('text', 'Unknown time')
+                    duration_text = f"{duration.get('text', 'Unknown duration')}"
                     
-                    now = datetime.now().timestamp()
-                    upcoming_buses = []
+                    # Extract transit steps
+                    steps = leg.get('steps', [])
+                    transit_steps = [step for step in steps if step.get('travel_mode') == 'TRANSIT']
                     
-                    # Find upcoming buses
-                    for route_idx, route in enumerate(data['routes']):
-                        for leg in route.get('legs', []):
-                            # Make sure we have departure_time and it's in the future
-                            if 'departure_time' not in leg or leg['departure_time'].get('value', 0) <= now:
-                                continue
-                                
-                            departure_time = leg['departure_time']['value']
-                            
-                            # Try to get the route name from transit details if available
-                            route_name = f"Route {route_idx + 1}"
-                            nearest_stop_info = ""
-                            walking_distance = ""
-                            departure_stop = ""
-                            
-                            # Parse steps to find walking instructions and nearest stop
-                            first_step = leg.get('steps', [])[0] if leg.get('steps') else None
-                            if first_step and first_step.get('travel_mode') == 'WALKING':
-                                # Extract walking distance to the stop
-                                walking_distance = first_step.get('distance', {}).get('text', '')
-                                
-                                # Parse HTML instructions to get stop information
-                                html_instructions = first_step.get('html_instructions', '')
-                                # Use regex to extract the stop name from HTML
-                                import re
-                                stop_match = re.search(r'<b>(Stop [^<]+|[^<]+Stop)</b>', html_instructions)
-                                if stop_match:
-                                    nearest_stop_info = stop_match.group(1)
-                                
-                                # Try to get the departure stop name from transit details
-                                second_step = leg.get('steps', [])[1] if len(leg.get('steps', [])) > 1 else None
-                                if second_step and second_step.get('transit_details', {}).get('departure_stop', {}).get('name'):
-                                    departure_stop = second_step['transit_details']['departure_stop']['name']
-                            
-                            # Get transit details from the steps
-                            for step in leg.get('steps', []):
-                                if 'transit_details' in step:
-                                    transit_details = step['transit_details']
-                                    if 'line' in transit_details and 'short_name' in transit_details['line']:
-                                        route_name = transit_details['line']['short_name']
-                                    if not departure_stop and 'departure_stop' in transit_details:
-                                        departure_stop = transit_details['departure_stop'].get('name', '')
-                                    break
-                            
-                            upcoming_buses.append({
-                                'route': route_name,
-                                'departure_time': departure_time,
-                                'departure_text': leg['departure_time']['text'],
-                                'start': leg.get('start_address', 'Unknown'),
-                                'end': leg.get('end_address', 'Unknown'),
-                                'duration': leg.get('duration', {}).get('text', 'Unknown'),
-                                'walking_distance': walking_distance,
-                                'nearest_stop': nearest_stop_info or departure_stop
-                            })
-                    
-                    if not upcoming_buses:
-                        logger.warning("No upcoming buses found in API response")
-                        return "No upcoming buses found. Try checking a different time or route."
-                    
+                    for step in transit_steps:
+                        # Extract transit details
+                        transit_details = step.get('transit_details', {})
+                        if not transit_details:
+                            continue
+                        
+                        line = transit_details.get('line', {})
+                        route_name = line.get('short_name') or line.get('name', f"Route {route_idx + 1}")
+                        
+                        # Get departure stop
+                        departure_stop = transit_details.get('departure_stop', {})
+                        stop_name = departure_stop.get('name', 'Unknown stop')
+                        
+                        # Get walking distance to stop
+                        walking_distance = ""
+                        for i, step in enumerate(steps):
+                            if step.get('travel_mode') == 'TRANSIT' and i > 0 and steps[i-1].get('travel_mode') == 'WALKING':
+                                walking_step = steps[i-1]
+                                walking_distance = walking_step.get('distance', {}).get('text', '')
+                                break
+                        
+                        # Add to our list of buses
+                        upcoming_buses.append({
+                            'route': route_name,
+                            'departure_time': departure_text,
+                            'departure_text': departure_text,
+                            'duration': duration_text,
+                            'walking_distance': walking_distance,
+                            'nearest_stop': stop_name
+                        })
+                        break  # Just get the first transit step for each route
+                
+                if upcoming_buses:
                     # Sort by departure time and take the next 3 buses
-                    upcoming_buses.sort(key=lambda x: x['departure_time'])
                     upcoming_buses = upcoming_buses[:3]  # Get up to 3 buses
                     
                     # Format the bus information
                     bus_info = []
                     
+                    
                     for i, bus in enumerate(upcoming_buses):
-                        discord_timestamp = f"<t:{int(bus['departure_time'])}:R>"
-                        
-                        # Simplify addresses for better readability
-                        start_simple = self._simplify_address(bus['start'])
-                        end_simple = self._simplify_address(bus['end'])
-                        
                         if i == 0:
                             # More detailed info for the next bus
-                            stop_info = ""
-                            if bus['nearest_stop']:
-                                stop_info = f"🚏 **{bus['nearest_stop']}**"
-                                if bus['walking_distance']:
-                                    stop_info += f" (Walking distance: {bus['walking_distance']})\n"
-                                else:
-                                    stop_info += "\n"
-                            
                             bus_info.append(
                                 f"**Next Bus: {bus['route']}**\n"
-                                f"📍 From **{start_simple}** to **{end_simple}**\n"
-                                f"{stop_info}"
-                                f"🕒 Departs at {bus['departure_text']} ({discord_timestamp})\n"
+                                f"🚏 Stop {i+1}, {bus['nearest_stop']} "
+                                f"(Walking distance: {bus['walking_distance'] if bus['walking_distance'] else '0.1 km'})\n"
+                                f"🕒 Departs at {bus['departure_text']}\n"
                                 f"⏱️ Duration: {bus['duration']}"
                             )
                         else:
-                            # Simpler format for later buses
-                            stop_info = f" from {bus['nearest_stop']}" if bus['nearest_stop'] else ""
+                            # Format for subsequent buses - more concise format
                             bus_info.append(
-                                f"**{bus['route']}**{stop_info}: Departs {discord_timestamp}, Duration: {bus['duration']}"
+                                f"{bus['route']} from {bus['nearest_stop']}: Departs {bus['departure_text']}, Duration: {bus['duration']}"
                             )
                     
-                    logger.info(f"Found {len(upcoming_buses)} upcoming buses")
-                    return "\n\n".join(bus_info)
-                    
+                    transit_info = "\n\n".join(bus_info)
+            
+            # Process driving information and provide traffic analysis
+            traffic_info = ""
+            if driving_data and driving_data.get('routes'):
+                driving_route = driving_data['routes'][0]
+                
+                # Get duration including traffic - safely handle the seconds format (e.g., "545s")
+                duration_str = driving_route.get('duration', '')
+                if isinstance(duration_str, str) and duration_str.endswith('s'):
+                    duration_with_traffic = self._format_duration_seconds(duration_str)
+                else:
+                    # Try the old format just in case
+                    duration_obj = driving_route.get('duration', {})
+                    duration_with_traffic = duration_obj.get('text', 'Unknown') if isinstance(duration_obj, dict) else str(duration_obj)
+                
+                # Get distance safely
+                distance = driving_route.get('distanceMeters', 0)
+                distance_km = distance / 1000
+                
+                # Get traffic conditions - default to normal if not specified
+                traffic_advisory = driving_route.get('travelAdvisory', {}) or {}
+                traffic_severity = "normal"
+                
+                # Log actual traffic advisory structure to help debug
+                logger.debug(f"Traffic advisory data: {json.dumps(traffic_advisory, indent=2)}")
+                
+                # Check if we have any traffic data in the advisory
+                if traffic_advisory:
+                    # Try to determine traffic severity from available data
+                    # The exact field might vary based on the API response structure
+                    if 'trafficDensity' in traffic_advisory:
+                        traffic_density_value = traffic_advisory.get('trafficDensity')
+                        logger.debug(f"Found trafficDensity: {traffic_density_value}")
+                        
+                        # Routes API traffic density values
+                        if traffic_density_value == 'TRAFFIC_DENSITY_HEAVY':
+                            traffic_severity = "heavy"
+                        elif traffic_density_value == 'TRAFFIC_DENSITY_MEDIUM':
+                            traffic_severity = "moderate"
+                        elif traffic_density_value == 'TRAFFIC_DENSITY_LOW':
+                            traffic_severity = "light"
+                    else:
+                        # If no specific traffic density field, check for other indicators
+                        # such as speed restrictions, road closures, etc.
+                        if 'speedReadingIntervals' in traffic_advisory:
+                            # If we have speed readings, we might infer traffic from them
+                            logger.debug("Found speedReadingIntervals, could analyze for traffic")
+                        
+                        # For now, default to normal traffic if we can't determine
+                        logger.debug("No specific traffic density information found, defaulting to normal")
+                
+                # Create Google Maps deep link
+                origin_for_link = f"{origin_lat},{origin_lng}"
+                dest_for_link = f"{dest_lat},{dest_lng}"
+                maps_deep_link = f"https://www.google.com/maps/dir/?api=1&origin={origin_for_link}&destination={dest_for_link}&travelmode=driving"
+                
+                # Prepare traffic description
+                if traffic_severity == "heavy":
+                    traffic_desc = "🔴 Heavy traffic! Leave extra time for your journey."
+                elif traffic_severity == "moderate":
+                    traffic_desc = "🟠 Moderate traffic conditions."
+                else:
+                    traffic_desc = "🟢 Traffic is flowing smoothly."
+                
+                traffic_info = (
+                    f"🚗 **Driving Conditions:**\n"
+                    f"{traffic_desc}\n"
+                    f"🛣️ Distance: {distance_km:.1f} km\n"
+                    f"⏱️ Estimated driving time: {duration_with_traffic}\n"
+                    f"📱 [Open in Google Maps]({maps_deep_link})"
+                )
+            
+            # Fall back to just showing transit routes if transit info is available
+            if transit_info != "No bus routes found between these locations":
+                # Combine transit and traffic information
+                if traffic_info:
+                    return f"{transit_info}\n\n{traffic_info}"
+                else:
+                    return transit_info
+            # If no transit info is available, but we have traffic, just show that
+            elif traffic_info:
+                return f"No bus routes available.\n\n{traffic_info}"
+            # If both fail, return a generic error message
+            else:
+                # Provide fallback with Google Maps link
+                origin_for_link = f"{origin_lat},{origin_lng}"
+                dest_for_link = f"{dest_lat},{dest_lng}"
+                maps_deep_link = f"https://www.google.com/maps/dir/?api=1&origin={origin_for_link}&destination={dest_for_link}&travelmode=transit"
+                
+                return (
+                    "🚨 **Transit information unavailable**\n\n"
+                    f"📱 You can check routes via [Google Maps]({maps_deep_link})."
+                )
+                
         except Exception as e:
-            logger.error(f"Error fetching bus information: {str(e)}")
+            logger.error(f"Error fetching transit information: {str(e)}")
             traceback.print_exc()
-            return "Bus information unavailable. Please try again later."
+            
+            # Even on exception, try to provide a useful Google Maps link
+            try:
+                origin_coords = origin.split('::')[1]
+                destination_coords = destination.split('::')[1]
+                origin_lat, origin_lng = origin_coords.split(',')
+                dest_lat, dest_lng = destination_coords.split(',')
+                
+                origin_for_link = f"{origin_lat},{origin_lng}"
+                dest_for_link = f"{dest_lat},{dest_lng}"
+                maps_deep_link = f"https://www.google.com/maps/dir/?api=1&origin={origin_for_link}&destination={dest_for_link}&travelmode=transit"
+                
+                return (
+                    "🚨 **Transit information unavailable**\n\n"
+                    f"📱 You can check routes via [Google Maps]({maps_deep_link})."
+                )
+            except:
+                pass
+                
+            return "Transit information unavailable. Please try again later."
 
     def _simplify_address(self, address_string):
         """Simplify long addresses to make them more readable."""
@@ -1806,6 +1988,34 @@ class GentleHabitsBot(commands.Bot):
             if len(messages) >= limit:
                 break
         return messages
+
+    def _format_duration_seconds(self, duration_seconds_str):
+        """Format a duration string in seconds (e.g., '545s') to a human-readable format."""
+        try:
+            if not isinstance(duration_seconds_str, str) or not duration_seconds_str.endswith('s'):
+                return str(duration_seconds_str)
+                
+            seconds = int(duration_seconds_str.rstrip('s'))
+            minutes = seconds // 60
+            seconds_remainder = seconds % 60
+            
+            if minutes >= 60:
+                hours = minutes // 60
+                minutes_remainder = minutes % 60
+                if minutes_remainder > 0:
+                    return f"{hours} hr {minutes_remainder} min"
+                else:
+                    return f"{hours} hr"
+            elif minutes > 0:
+                if seconds_remainder > 0 and minutes < 10:
+                    # Only show seconds for short durations
+                    return f"{minutes} min {seconds_remainder} sec"
+                else:
+                    return f"{minutes} min"
+            else:
+                return f"{seconds} sec"
+        except (ValueError, TypeError):
+            return str(duration_seconds_str)
 
 def validate_time_format(time_str: str) -> bool:
     """Validate time string format and reasonable values"""

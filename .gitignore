@@ -16,7 +16,7 @@
 gentle_habits.db
 pycache/
 
-*/__pycache__
+*/__pycache__\
 */pycache
 */pycache/*
 */pycache/*/*
